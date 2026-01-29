@@ -187,6 +187,12 @@ function doPost(e) {
     var lista = json.pedidos; // O Python manda { "pedidos": [...] }
     var novasLinhas = [];
 
+    // Log dos campos recebidos para diagnóstico
+    if (lista && lista.length > 0) {
+      Logger.log("📋 Campos recebidos do Python: " + Object.keys(lista[0]).join(", "));
+      Logger.log("📋 Valor do campo OC: ordemCompra=" + lista[0].ordemCompra + " | ordem_compra=" + lista[0].ordem_compra + " | oc=" + lista[0].oc);
+    }
+
     // Verificação simples de duplicidade (olhando ultimos 500 registros para ser rápido)
     var ultimaLinha = sheet.getLastRow();
     var arquivosExistentes = [];
@@ -209,7 +215,7 @@ function doPost(e) {
           p.qtd,
           p.unidade,
           p.valor,
-          p.ordemCompra || "N/D"                     // Ordem de Compra
+          p.ordemCompra || p.ordem_compra || p.ordemdecompra || p.oc || p.OC || p.ordem || "N/D"  // Ordem de Compra (aceita múltiplos nomes)
         ]);
       }
     }

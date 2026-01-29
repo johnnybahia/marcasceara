@@ -1765,10 +1765,15 @@
         else if(textoUnd.includes("M")) classeBadge = "badge badge-metro";
         else classeBadge = "badge";
 
+        var ocValor = r[9] ? r[9].toString().trim() : "";
+        var ocDisplay = (ocValor && ocValor !== "N/D")
+          ? '<b style="color:#2980b9;">' + ocValor + '</b>'
+          : '<span style="color:#ccc; font-style:italic; font-size:12px;">Sem OC</span>';
+
         tr.innerHTML = `
           <td>${r[0]}</td>
           <td>${r[1]}</td>
-          <td><b style="color:#2980b9;">${r[9] || 'N/D'}</b></td>
+          <td>${ocDisplay}</td>
           <td><b>${r[3]}</b></td>
           <td>${r[4]}</td>
           <td>${r[5]}</td>
@@ -2784,10 +2789,15 @@
         else if(textoUnd.includes("M")) classeBadge = "badge badge-metro";
         else classeBadge = "badge";
 
+        var ocValor = r[9] ? r[9].toString().trim() : "";
+        var ocDisplay = (ocValor && ocValor !== "N/D")
+          ? '<b style="color:#2980b9;">' + ocValor + '</b>'
+          : '<span style="color:#ccc; font-style:italic; font-size:12px;">Sem OC</span>';
+
         tr.innerHTML = `
           <td>${r[0]}</td>
           <td>${r[1]}</td>
-          <td><b style="color:#2980b9;">${r[9] || 'N/D'}</b></td>
+          <td>${ocDisplay}</td>
           <td><b>${r[3]}</b></td>
           <td>${r[4]}</td>
           <td>${r[5]}</td>
