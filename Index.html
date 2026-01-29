@@ -978,10 +978,10 @@
       if (token && usuario) {
         addDebugLog("Token encontrado, validando sessao...");
         google.script.run
-          .withSuccessHandler(function(valido) {
-            if (valido) {
+          .withSuccessHandler(function(resultado) {
+            if (resultado && resultado.valido) {
               addDebugLog("Sessao valida!", "success");
-              usuarioLogado = usuario;
+              usuarioLogado = resultado.usuario || usuario;
               mostrarApp();
             } else {
               addDebugLog("Sessao expirada", "error");

@@ -20,7 +20,7 @@ function verificarLogin(usuario, senha) {
     if (!sheet) {
       Logger.log("❌ Aba 'senha' não encontrada!");
       return {
-        status: "erro",
+        sucesso: false,
         mensagem: "Erro de configuração do sistema"
       };
     }
@@ -30,7 +30,7 @@ function verificarLogin(usuario, senha) {
     if (lastRow < 2) {
       Logger.log("❌ Nenhum usuário cadastrado");
       return {
-        status: "erro",
+        sucesso: false,
         mensagem: "Nenhum usuário cadastrado"
       };
     }
@@ -49,9 +49,12 @@ function verificarLogin(usuario, senha) {
       if (usuarioNaAba === usuarioDigitado && senhaNaAba === senhaDigitada) {
         Logger.log("✅ Login bem-sucedido para: " + usuario);
 
-        // Retorna sucesso com nome do usuário (SEM TOKEN)
+        // Gera token de sessão
+        var token = gerarTokenSessao(usuario);
+
         return {
-          status: "sucesso",
+          sucesso: true,
+          token: token,
           nome: usuario,
           mensagem: "Login realizado com sucesso!"
         };
@@ -60,14 +63,14 @@ function verificarLogin(usuario, senha) {
 
     Logger.log("❌ Credenciais inválidas para: " + usuario);
     return {
-      status: "erro",
+      sucesso: false,
       mensagem: "Usuário ou senha incorretos"
     };
 
   } catch (erro) {
     Logger.log("❌ Erro ao verificar login: " + erro.toString());
     return {
-      status: "erro",
+      sucesso: false,
       mensagem: "Erro ao verificar credenciais: " + erro.message
     };
   }
