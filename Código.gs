@@ -20,7 +20,7 @@ function verificarLogin(usuario, senha) {
     if (!sheet) {
       Logger.log("❌ Aba 'senha' não encontrada!");
       return {
-        sucesso: false,
+        status: "erro",
         mensagem: "Erro de configuração do sistema"
       };
     }
@@ -30,7 +30,7 @@ function verificarLogin(usuario, senha) {
     if (lastRow < 2) {
       Logger.log("❌ Nenhum usuário cadastrado");
       return {
-        sucesso: false,
+        status: "erro",
         mensagem: "Nenhum usuário cadastrado"
       };
     }
@@ -49,12 +49,9 @@ function verificarLogin(usuario, senha) {
       if (usuarioNaAba === usuarioDigitado && senhaNaAba === senhaDigitada) {
         Logger.log("✅ Login bem-sucedido para: " + usuario);
 
-        // Gera token de sessão
-        var token = gerarTokenSessao(usuario);
-
+        // Retorna sucesso com nome do usuário (SEM TOKEN)
         return {
-          sucesso: true,
-          token: token,
+          status: "sucesso",
           nome: usuario,
           mensagem: "Login realizado com sucesso!"
         };
@@ -63,14 +60,14 @@ function verificarLogin(usuario, senha) {
 
     Logger.log("❌ Credenciais inválidas para: " + usuario);
     return {
-      sucesso: false,
+      status: "erro",
       mensagem: "Usuário ou senha incorretos"
     };
 
   } catch (erro) {
     Logger.log("❌ Erro ao verificar login: " + erro.toString());
     return {
-      sucesso: false,
+      status: "erro",
       mensagem: "Erro ao verificar credenciais: " + erro.message
     };
   }
@@ -166,7 +163,7 @@ function doGet(e) {
 
   // Serve sempre o Index.html - a autenticação acontece no frontend
   return HtmlService.createHtmlOutputFromFile('Index')
-      .setTitle('Pedidos por Marca - Marfim Ceará')
+      .setTitle('Pedidos por Marca - Marfim Bahia')
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
@@ -179,7 +176,7 @@ function doPost(e) {
   try {
     var doc = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = doc.getSheetByName("Dados"); // Certifique-se que o nome da aba é 'Dados'
-
+    
     if (!sheet) {
       // Se não existir, cria e põe cabeçalho
       sheet = doc.insertSheet("Dados");
@@ -986,6 +983,7 @@ function getFaturamentoDia() {
     var props = PropertiesService.getScriptProperties();
 
     // CORREÇÃO: Verifica e limpa faturamento de dias anteriores
+    // Isso previne que o card exiba dados antigos como se fossem de hoje
     var dataAtual = new Date();
     var diaAtual = ("0" + dataAtual.getDate()).slice(-2) + "/" +
                    ("0" + (dataAtual.getMonth() + 1)).slice(-2) + "/" +
@@ -1003,6 +1001,7 @@ function getFaturamentoDia() {
     }
 
     // SINCRONIZAÇÃO AUTOMÁTICA: Atualiza aba de controle com novas OCs
+    // Isso garante que pedidos novos apareçam automaticamente na aba
     try {
       var doc = SpreadsheetApp.getActiveSpreadsheet();
       var sheetControle = doc.getSheetByName("ControleFaturamento");
@@ -1015,12 +1014,14 @@ function getFaturamentoDia() {
       }
     } catch (erroSinc) {
       Logger.log("⚠️ Erro ao sincronizar aba de controle: " + erroSinc.toString());
+      // Continua execução mesmo se sincronização falhar
     }
 
     var snapshotAnterior = props.getProperty('SNAPSHOT_DADOS1');
     var timestampAnterior = props.getProperty('SNAPSHOT_TIMESTAMP');
 
     // Lê estado atual AGRUPADO por OC (soma valores repetidos)
+    // OTIMIZAÇÃO: Resolve problema de OCs duplicadas
     var mapaAtual = agruparDados1PorOC();
 
     var faturado = [];
@@ -1045,7 +1046,10 @@ function getFaturamentoDia() {
     // OTIMIZAÇÃO: Carrega mapa de marcas UMA VEZ
     var mapaOCMarca = criarMapaOCMarca();
 
-    // Compara totais AGRUPADOS por OC
+    // NOVA LÓGICA: Compara totais AGRUPADOS por OC
+    // Antes: Comparava linha por linha (OCs duplicadas sobrescreviam)
+    // Agora: Compara soma total de cada OC (valores repetidos são somados)
+    // Benefício: Detecção precisa mesmo com múltiplas linhas da mesma OC
     Object.keys(mapaAnterior).forEach(function(oc) {
       var itemAnterior = mapaAnterior[oc];
       var itemAtual = mapaAtual[oc];
@@ -1061,6 +1065,7 @@ function getFaturamentoDia() {
       }
 
       if (valorFaturado > 0) {
+        // Busca marca no mapa (rápido)
         var marca = buscarMarcaNoMapa(oc, mapaOCMarca);
 
         faturado.push({
@@ -1098,20 +1103,30 @@ function getFaturamentoDia() {
       return b.valor - a.valor;
     });
 
-    // Atualiza snapshot
+    // CORREÇÃO CRÍTICA: Atualiza snapshot SOMENTE via trigger, nunca via webapp
+    // Isso evita que chamadas manuais destruam a detecção de faturamento
+    // O snapshot só deve ser atualizado DEPOIS que o faturamento foi processado
     Logger.log("📸 Atualizando snapshot após detecção de faturamento...");
     props.setProperty('SNAPSHOT_DADOS1', JSON.stringify(mapaAtual));
     props.setProperty('SNAPSHOT_TIMESTAMP', obterTimestamp());
 
-    // === LÓGICA ACUMULATIVA ===
+    // === LÓGICA ACUMULATIVA: Acumula faturamentos do mesmo dia ===
+    var dataAtual = new Date();
+    var diaAtual = ("0" + dataAtual.getDate()).slice(-2) + "/" +
+                   ("0" + (dataAtual.getMonth() + 1)).slice(-2) + "/" +
+                   dataAtual.getFullYear();
+
     var diaArmazenado = props.getProperty('FATURAMENTO_DATA');
     var faturamentoAcumulado = [];
 
+    // Verifica se é um novo dia
     if (diaArmazenado !== diaAtual) {
+      // Novo dia - reseta o acumulado
       Logger.log("📅 Novo dia detectado (" + diaAtual + ") - resetando acumulado de faturamento");
       props.setProperty('FATURAMENTO_DATA', diaAtual);
       faturamentoAcumulado = [];
     } else {
+      // Mesmo dia - carrega o acumulado existente
       var ultimoFaturamento = props.getProperty('ULTIMO_FATURAMENTO');
       if (ultimoFaturamento) {
         faturamentoAcumulado = JSON.parse(ultimoFaturamento);
@@ -1119,12 +1134,14 @@ function getFaturamentoDia() {
       }
     }
 
-    // Se houve novo faturamento, acumula
+    // Se houve novo faturamento nesta verificação, acumula com o existente
     if (resultado.length > 0) {
       Logger.log("💰 Novo faturamento detectado: " + resultado.length + " itens");
 
+      // Cria mapa para acumular
       var mapAcumulado = {};
 
+      // Primeiro, adiciona o que já estava acumulado
       faturamentoAcumulado.forEach(function(item) {
         var chave = item.cliente + "|" + item.marca;
         mapAcumulado[chave] = {
@@ -1134,6 +1151,7 @@ function getFaturamentoDia() {
         };
       });
 
+      // Depois, soma o novo faturamento
       resultado.forEach(function(item) {
         var chave = item.cliente + "|" + item.marca;
         if (!mapAcumulado[chave]) {
@@ -1146,37 +1164,48 @@ function getFaturamentoDia() {
         mapAcumulado[chave].valor += item.valor;
       });
 
+      // Converte de volta para array
       var novoAcumulado = Object.keys(mapAcumulado).map(function(chave) {
         return mapAcumulado[chave];
       });
 
+      // Ordena por valor (maior primeiro)
       novoAcumulado.sort(function(a, b) {
         return b.valor - a.valor;
       });
 
+      // Salva o acumulado
       props.setProperty('ULTIMO_FATURAMENTO', JSON.stringify(novoAcumulado));
       props.setProperty('ULTIMO_FATURAMENTO_TIMESTAMP', obterTimestamp());
 
       Logger.log("💾 Salvou faturamento acumulado: " + novoAcumulado.length + " itens (cliente+marca)");
 
+      // Atualiza resultado para retornar o acumulado
       resultado = novoAcumulado;
 
+      // Salva no histórico da planilha (apenas quando é novo faturamento no acumulado)
       salvarFaturamentoNoHistorico(novoAcumulado, diaAtual);
+
+      // NOVO: Registra faturamento na aba de controle visual (com OCs individuais)
+      // Usa a lista 'faturado' que contém os OCs antes do agrupamento
       registrarFaturamentoNaAbaControle(faturado, diaAtual + " " + obterTimestamp().split(" às ")[1]);
     } else if (faturamentoAcumulado.length > 0) {
+      // Não houve novo faturamento, mas há acumulado do dia
       Logger.log("ℹ️ Nenhum novo faturamento nesta verificação, mantendo acumulado do dia");
       resultado = faturamentoAcumulado;
     }
 
     Logger.log("✅ getFaturamentoDia concluído: " + resultado.length + " itens calculados");
 
-    // Lê dados REAIS do histórico
+    // IMPORTANTE: Lê os dados REAIS do histórico (incluindo edições manuais)
+    // Não retorna o calculado, mas sim o que está efetivamente salvo
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("HistoricoFaturamento");
     if (sheet && sheet.getLastRow() > 1) {
       var historicoDados = sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();
       var dadosDodia = [];
 
       historicoDados.forEach(function(row) {
+        // Normaliza data
         var dataRegistro = row[0];
         if (dataRegistro instanceof Date) {
           var d = dataRegistro;
@@ -1188,6 +1217,7 @@ function getFaturamentoDia() {
           dataRegistro = dataRegistro.toString().trim();
         }
 
+        // Se é o dia de hoje
         if (dataRegistro === diaAtual) {
           dadosDodia.push({
             cliente: row[1].toString(),
@@ -1198,7 +1228,7 @@ function getFaturamentoDia() {
       });
 
       if (dadosDodia.length > 0) {
-        Logger.log("📊 Retornando dados do histórico: " + dadosDodia.length + " itens");
+        Logger.log("📊 Retornando dados do histórico (incluindo edições manuais): " + dadosDodia.length + " itens");
         resultado = dadosDodia;
       }
     }
@@ -1222,17 +1252,19 @@ function getFaturamentoDia() {
 
 /**
  * Retorna o último faturamento detectado (para exibir na webapp)
- * Lê do HISTÓRICO (inclui edições manuais)
+ * ATUALIZADO: Agora lê do HISTÓRICO (inclui edições manuais)
  */
 function getUltimoFaturamento() {
   try {
     Logger.log("📊 getUltimoFaturamento: Lendo dados do histórico...");
 
+    // Data de hoje
     var dataAtual = new Date();
     var diaAtual = ("0" + dataAtual.getDate()).slice(-2) + "/" +
                    ("0" + (dataAtual.getMonth() + 1)).slice(-2) + "/" +
                    dataAtual.getFullYear();
 
+    // Lê dados REAIS do histórico (incluindo edições manuais)
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("HistoricoFaturamento");
 
     if (!sheet || sheet.getLastRow() < 2) {
@@ -1245,12 +1277,15 @@ function getUltimoFaturamento() {
       };
     }
 
+    // Lê todos os dados do histórico
     var historicoDados = sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();
     var dadosDodia = [];
     var ultimaDataComDados = null;
     var timestampUltimoRegistro = null;
 
+    // Primeiro, tenta buscar dados do dia atual
     historicoDados.forEach(function(row) {
+      // Normaliza data
       var dataRegistro = row[0];
       if (dataRegistro instanceof Date) {
         var d = dataRegistro;
@@ -1262,6 +1297,7 @@ function getUltimoFaturamento() {
         dataRegistro = dataRegistro.toString().trim();
       }
 
+      // Se é o dia de hoje
       if (dataRegistro === diaAtual) {
         dadosDodia.push({
           cliente: row[1].toString(),
@@ -1270,15 +1306,18 @@ function getUltimoFaturamento() {
           data: dataRegistro
         });
         ultimaDataComDados = dataRegistro;
+        // Pega o timestamp da coluna F (índice 5)
         if (row[5]) {
           timestampUltimoRegistro = row[5].toString();
         }
       }
     });
 
+    // Se não houver dados de hoje, busca os dados do último dia registrado
     if (dadosDodia.length === 0) {
       Logger.log("ℹ️ Sem dados de hoje, buscando último faturamento registrado...");
 
+      // Agrupa dados por data para encontrar a data mais recente
       var dadosPorData = {};
 
       historicoDados.forEach(function(row) {
@@ -1306,18 +1345,20 @@ function getUltimoFaturamento() {
         });
       });
 
+      // Encontra a data mais recente (converte para Date para comparar)
       var datasOrdenadas = Object.keys(dadosPorData).sort(function(a, b) {
         var partesA = a.split('/');
         var partesB = b.split('/');
         var dateA = new Date(partesA[2], partesA[1] - 1, partesA[0]);
         var dateB = new Date(partesB[2], partesB[1] - 1, partesB[0]);
-        return dateB - dateA;
+        return dateB - dateA; // Mais recente primeiro
       });
 
       if (datasOrdenadas.length > 0) {
         ultimaDataComDados = datasOrdenadas[0];
         dadosDodia = dadosPorData[ultimaDataComDados];
 
+        // Pega o timestamp do último registro dessa data
         var ultimoRegistro = dadosDodia[dadosDodia.length - 1];
         if (ultimoRegistro.timestamp) {
           timestampUltimoRegistro = ultimoRegistro.timestamp;
@@ -1338,16 +1379,19 @@ function getUltimoFaturamento() {
       };
     }
 
+    // Formata o timestamp para exibição
     var ehHoje = ultimaDataComDados === diaAtual;
     var timestampExibicao;
 
     if (ehHoje) {
+      // É de hoje - mostra timestamp ou "hoje"
       if (timestampUltimoRegistro) {
         timestampExibicao = "Faturamento de hoje: " + timestampUltimoRegistro;
       } else {
         timestampExibicao = "Faturamento de hoje";
       }
     } else {
+      // É histórico - mostra a data
       timestampExibicao = "Faturamento de " + ultimaDataComDados;
     }
 
@@ -1372,6 +1416,8 @@ function getUltimoFaturamento() {
 
 /**
  * Salva o faturamento do dia no histórico da planilha
+ * @param {Array} dados - Array com os dados do faturamento
+ * @param {string} data - Data no formato DD/MM/AAAA
  */
 function salvarFaturamentoNoHistorico(dados, data) {
   try {
@@ -1383,10 +1429,13 @@ function salvarFaturamentoNoHistorico(dados, data) {
     var doc = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = doc.getSheetByName("HistoricoFaturamento");
 
+    // Cria a aba se não existir
     if (!sheet) {
       Logger.log("📋 Criando aba 'HistoricoFaturamento'...");
       sheet = doc.insertSheet("HistoricoFaturamento");
+      // Adiciona cabeçalho (com coluna Observação)
       sheet.appendRow(["Data", "Cliente", "Marca", "Valor Faturado", "Observação", "Timestamp"]);
+      // Formata cabeçalho
       var headerRange = sheet.getRange(1, 1, 1, 6);
       headerRange.setBackground("#d32f2f");
       headerRange.setFontColor("#FFFFFF");
@@ -1397,13 +1446,16 @@ function salvarFaturamentoNoHistorico(dados, data) {
     var timestamp = obterTimestamp();
     var novasLinhas = [];
 
+    // Verifica registros já existentes para esta data
     var lastRow = sheet.getLastRow();
     var registrosExistentes = {};
 
     if (lastRow > 1) {
+      // Lê todos os registros do histórico
       var dadosExistentes = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
 
       dadosExistentes.forEach(function(row) {
+        // Normaliza data
         var dataRegistro = row[0];
         if (dataRegistro instanceof Date) {
           var d = dataRegistro;
@@ -1415,6 +1467,7 @@ function salvarFaturamentoNoHistorico(dados, data) {
           dataRegistro = dataRegistro.toString().trim();
         }
 
+        // Se é o mesmo dia que estamos salvando
         if (dataRegistro === data) {
           var chave = row[1].toString().toUpperCase() + "|" + row[2].toString().toUpperCase();
           registrosExistentes[chave] = {
@@ -1427,16 +1480,22 @@ function salvarFaturamentoNoHistorico(dados, data) {
       Logger.log("📋 Encontrados " + Object.keys(registrosExistentes).length + " registros existentes para " + data);
     }
 
+    // Processa novos dados
     dados.forEach(function(item) {
       var chave = item.cliente.toUpperCase() + "|" + item.marca.toUpperCase();
 
+      // Se já existe no histórico
       if (registrosExistentes[chave]) {
         var registroExistente = registrosExistentes[chave];
 
+        // Se tem observação = foi editado manualmente = NÃO sobrescreve
         if (registroExistente.observacao && registroExistente.observacao.trim() !== "") {
           Logger.log("✏️ Mantendo valor editado manualmente: " + item.cliente + " | " + item.marca + " = R$ " + registroExistente.valor);
+          // Não adiciona à lista de novas linhas (mantém o existente)
         } else {
+          // Sem observação = valor automático = pode atualizar
           Logger.log("🔄 Atualizando valor automático: " + item.cliente + " | " + item.marca + " = R$ " + item.valor);
+          // Remove o antigo (será adicionado novamente com novo valor)
           registrosExistentes[chave] = null;
 
           novasLinhas.push([
@@ -1444,27 +1503,30 @@ function salvarFaturamentoNoHistorico(dados, data) {
             item.cliente,
             item.marca,
             item.valor,
-            "",
+            "", // Observação vazia (automático)
             timestamp
           ]);
         }
       } else {
+        // Registro novo - adiciona
         Logger.log("➕ Adicionando novo registro: " + item.cliente + " | " + item.marca + " = R$ " + item.valor);
         novasLinhas.push([
           data,
           item.cliente,
           item.marca,
           item.valor,
-          "",
+          "", // Observação vazia (automático)
           timestamp
         ]);
       }
     });
 
+    // Remove registros automáticos antigos que serão atualizados
     if (lastRow > 1) {
       for (var i = lastRow; i >= 2; i--) {
         var row = sheet.getRange(i, 1, 1, 6).getValues()[0];
 
+        // Normaliza data
         var dataLinha = row[0];
         if (dataLinha instanceof Date) {
           var d = dataLinha;
@@ -1476,6 +1538,7 @@ function salvarFaturamentoNoHistorico(dados, data) {
           dataLinha = dataLinha.toString().trim();
         }
 
+        // Se é o mesmo dia e NÃO tem observação (automático)
         if (dataLinha === data) {
           var obs = row[4] ? row[4].toString().trim() : "";
           if (!obs || obs === "") {
@@ -1486,16 +1549,18 @@ function salvarFaturamentoNoHistorico(dados, data) {
       }
     }
 
+    // Adiciona as novas linhas
     if (novasLinhas.length > 0) {
       var ultimaLinha = sheet.getLastRow();
       sheet.getRange(ultimaLinha + 1, 1, novasLinhas.length, 6).setValues(novasLinhas);
 
+      // Formata valores como moeda
       var valorRange = sheet.getRange(ultimaLinha + 1, 4, novasLinhas.length, 1);
       valorRange.setNumberFormat("R$ #,##0.00");
 
       Logger.log("✅ Salvou " + novasLinhas.length + " linhas no histórico para " + data);
     } else {
-      Logger.log("ℹ️ Nenhum registro novo para adicionar");
+      Logger.log("ℹ️ Nenhum registro novo para adicionar (todos já existem ou foram editados manualmente)");
     }
 
   } catch (erro) {
@@ -1505,6 +1570,7 @@ function salvarFaturamentoNoHistorico(dados, data) {
 
 /**
  * Retorna o histórico completo de faturamentos salvos na planilha
+ * @returns {Object} Objeto com array de histórico
  */
 function getHistoricoFaturamento() {
   try {
@@ -1530,11 +1596,13 @@ function getHistoricoFaturamento() {
       };
     }
 
+    // Lê todos os dados (pula cabeçalho) - agora com 6 colunas incluindo Observação
     var dados = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
 
     var historico = [];
 
     dados.forEach(function(row) {
+      // Formata timestamp se vier como Date object
       var timestampFormatado = row[5];
       if (row[5] instanceof Date) {
         var d = row[5];
@@ -1548,6 +1616,7 @@ function getHistoricoFaturamento() {
         timestampFormatado = row[5] ? row[5].toString() : "";
       }
 
+      // Formata data se vier como Date object
       var dataFormatada = row[0];
       if (row[0] instanceof Date) {
         var d = row[0];
@@ -1569,7 +1638,9 @@ function getHistoricoFaturamento() {
       });
     });
 
+    // Ordena por data (mais recente primeiro)
     historico.sort(function(a, b) {
+      // Converte DD/MM/AAAA para comparação
       var partesA = a.data.split('/');
       var partesB = b.data.split('/');
       var dataA = new Date(partesA[2], partesA[1] - 1, partesA[0]);
@@ -1610,12 +1681,14 @@ function obterTimestamp() {
 
 /**
  * Função para resetar manualmente o acumulado de faturamento do dia
+ * USE ESTA FUNÇÃO PARA LIMPAR/RESETAR O ACUMULADO (útil para testes ou ajustes)
  */
 function resetarAcumuladoFaturamento() {
   Logger.log("🔄 Resetando acumulado de faturamento...");
 
   var props = PropertiesService.getScriptProperties();
 
+  // Remove os dados acumulados
   props.deleteProperty('ULTIMO_FATURAMENTO');
   props.deleteProperty('ULTIMO_FATURAMENTO_TIMESTAMP');
   props.deleteProperty('FATURAMENTO_DATA');
@@ -1631,6 +1704,7 @@ function resetarAcumuladoFaturamento() {
 
 /**
  * Função manual para executar a verificação de faturamento
+ * USE ESTA FUNÇÃO PARA EXECUTAR MANUALMENTE
  */
 function executarVerificacaoFaturamento() {
   Logger.log("🔄 Executando verificação manual de faturamento...");
@@ -1658,8 +1732,10 @@ function executarVerificacaoFaturamento() {
 
 /**
  * Configura triggers automáticos (a cada 1 hora)
+ * EXECUTE ESTA FUNÇÃO UMA VEZ PARA CONFIGURAR OS HORÁRIOS AUTOMÁTICOS
  */
 function setupTriggers() {
+  // Remove triggers antigos para evitar duplicação
   var triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function(trigger) {
     if (trigger.getHandlerFunction() === 'executarVerificacaoFaturamento') {
@@ -1667,6 +1743,7 @@ function setupTriggers() {
     }
   });
 
+  // Cria trigger para executar A CADA 1 HORA
   ScriptApp.newTrigger('executarVerificacaoFaturamento')
     .timeBased()
     .everyHours(1)
@@ -1674,12 +1751,15 @@ function setupTriggers() {
 
   Logger.log("✅ Triggers configurados com sucesso!");
   Logger.log("⏰ Verificações automáticas A CADA 1 HORA (24x por dia)");
+  Logger.log("ℹ️  Sistema detectará faturamento muito mais rápido!");
 }
 
 /**
  * Configura triggers para 2x ao dia (8h e 19h) - MODO ECONÔMICO
+ * Use esta função se quiser menos verificações (economiza quotas do Google)
  */
 function setupTriggers2xDia() {
+  // Remove triggers antigos para evitar duplicação
   var triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function(trigger) {
     if (trigger.getHandlerFunction() === 'executarVerificacaoFaturamento') {
@@ -1687,12 +1767,14 @@ function setupTriggers2xDia() {
     }
   });
 
+  // Cria trigger para 8h
   ScriptApp.newTrigger('executarVerificacaoFaturamento')
     .timeBased()
     .atHour(8)
     .everyDays(1)
     .create();
 
+  // Cria trigger para 19h
   ScriptApp.newTrigger('executarVerificacaoFaturamento')
     .timeBased()
     .atHour(19)
@@ -1714,6 +1796,7 @@ function testarPedidosAFaturar() {
   Logger.log("🧪 Iniciando teste completo OTIMIZADO...");
   Logger.log("=".repeat(50));
 
+  // 1. Testa leitura da aba Dados1
   Logger.log("\n📋 Passo 1: Testando leitura da aba Dados1...");
   var dados = lerDados1();
   Logger.log("   Registros encontrados: " + dados.length);
@@ -1728,6 +1811,7 @@ function testarPedidosAFaturar() {
     return;
   }
 
+  // 2. Testa criação do mapa de marcas
   Logger.log("\n🗺️ Passo 2: Testando criação do mapa OC->Marca...");
   var inicio = new Date().getTime();
   var mapaOCMarca = criarMapaOCMarca();
@@ -1735,11 +1819,13 @@ function testarPedidosAFaturar() {
   Logger.log("   Mapa criado em " + tempoMapa + " segundos");
   Logger.log("   Total de OCs no mapa: " + Object.keys(mapaOCMarca).length);
 
+  // Testa busca de uma marca
   var ocTeste = dados[0].ordemCompra;
   Logger.log("   Testando busca para OC: " + ocTeste);
   var marca = buscarMarcaNoMapa(ocTeste, mapaOCMarca);
   Logger.log("   Marca encontrada: " + marca);
 
+  // 3. Testa função completa
   Logger.log("\n💼 Passo 3: Testando getPedidosAFaturar()...");
   inicio = new Date().getTime();
   var resultado = getPedidosAFaturar();
@@ -1757,6 +1843,7 @@ function testarPedidosAFaturar() {
     });
   }
 
+  // 4. Retorna resultado formatado em JSON
   Logger.log("\n=".repeat(50));
   Logger.log("✅ Teste concluído com sucesso!");
   Logger.log("🚀 Performance: " + tempoTotal + " segundos para " + dados.length + " registros");
@@ -1800,6 +1887,7 @@ function verificarTamanhoAbas() {
   Logger.log("📊 Verificando tamanho das abas...");
   Logger.log("=".repeat(50));
 
+  // Verifica aba Dados
   var sheetDados = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados");
   if (sheetDados) {
     var totalDados = sheetDados.getLastRow();
@@ -1810,6 +1898,7 @@ function verificarTamanhoAbas() {
     Logger.log("❌ Aba 'Dados' não encontrada!");
   }
 
+  // Verifica aba Dados1
   var sheetDados1 = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados1");
   if (sheetDados1) {
     var totalDados1 = sheetDados1.getLastRow();
@@ -1832,6 +1921,12 @@ function verificarTamanhoAbas() {
 
 /**
  * Edita um registro específico de faturamento
+ * @param {string} data - Data do registro (DD/MM/AAAA)
+ * @param {string} cliente - Nome do cliente
+ * @param {string} marca - Marca
+ * @param {number} novoValor - Novo valor corrigido
+ * @param {string} observacao - Observação sobre o ajuste
+ * @returns {Object} Resultado da operação
  */
 function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) {
   try {
@@ -1855,10 +1950,12 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
       };
     }
 
+    // Busca o registro
     var dados = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
     var registroEncontrado = false;
     var linhaParaEditar = -1;
 
+    // Normaliza os valores de busca
     var dataBusca = data.trim();
     var clienteBusca = cliente.trim().toUpperCase();
     var marcaBusca = marca.trim().toUpperCase();
@@ -1866,6 +1963,7 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
     Logger.log("🔍 Buscando: Data=" + dataBusca + " | Cliente=" + clienteBusca + " | Marca=" + marcaBusca);
 
     for (var i = 0; i < dados.length; i++) {
+      // Normaliza a data da planilha
       var dataPlanilha = dados[i][0];
       if (dataPlanilha instanceof Date) {
         var d = dataPlanilha;
@@ -1885,7 +1983,7 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
       if (dataPlanilha === dataBusca &&
           clientePlanilha === clienteBusca &&
           marcaPlanilha === marcaBusca) {
-        linhaParaEditar = i + 2;
+        linhaParaEditar = i + 2; // +2 porque array começa em 0 e pula cabeçalho
         registroEncontrado = true;
         Logger.log("✅ Registro encontrado na linha " + linhaParaEditar);
         break;
@@ -1900,8 +1998,11 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
       };
     }
 
-    sheet.getRange(linhaParaEditar, 4).setValue(novoValor);
-    sheet.getRange(linhaParaEditar, 5).setValue(observacao);
+    // Atualiza o valor e observação
+    sheet.getRange(linhaParaEditar, 4).setValue(novoValor); // Coluna D: Valor
+    sheet.getRange(linhaParaEditar, 5).setValue(observacao); // Coluna E: Observação
+
+    // Formata valor como moeda
     sheet.getRange(linhaParaEditar, 4).setNumberFormat("R$ #,##0.00");
 
     Logger.log("✅ Registro editado com sucesso!");
@@ -1922,6 +2023,10 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
 
 /**
  * Deleta um registro específico de faturamento
+ * @param {string} data - Data do registro (DD/MM/AAAA)
+ * @param {string} cliente - Nome do cliente
+ * @param {string} marca - Marca
+ * @returns {Object} Resultado da operação
  */
 function deletarRegistroFaturamento(data, cliente, marca) {
   try {
@@ -1945,9 +2050,11 @@ function deletarRegistroFaturamento(data, cliente, marca) {
       };
     }
 
+    // Busca o registro
     var dados = sheet.getRange(2, 1, lastRow - 1, 6).getValues();
     var linhaParaDeletar = -1;
 
+    // Normaliza os valores de busca
     var dataBusca = data.trim();
     var clienteBusca = cliente.trim().toUpperCase();
     var marcaBusca = marca.trim().toUpperCase();
@@ -1955,6 +2062,7 @@ function deletarRegistroFaturamento(data, cliente, marca) {
     Logger.log("🔍 Buscando para deletar: Data=" + dataBusca + " | Cliente=" + clienteBusca + " | Marca=" + marcaBusca);
 
     for (var i = 0; i < dados.length; i++) {
+      // Normaliza a data da planilha
       var dataPlanilha = dados[i][0];
       if (dataPlanilha instanceof Date) {
         var d = dataPlanilha;
@@ -1972,7 +2080,7 @@ function deletarRegistroFaturamento(data, cliente, marca) {
       if (dataPlanilha === dataBusca &&
           clientePlanilha === clienteBusca &&
           marcaPlanilha === marcaBusca) {
-        linhaParaDeletar = i + 2;
+        linhaParaDeletar = i + 2; // +2 porque array começa em 0 e pula cabeçalho
         Logger.log("✅ Registro encontrado na linha " + linhaParaDeletar);
         break;
       }
@@ -1986,6 +2094,7 @@ function deletarRegistroFaturamento(data, cliente, marca) {
       };
     }
 
+    // Deleta a linha
     sheet.deleteRow(linhaParaDeletar);
 
     Logger.log("✅ Registro deletado com sucesso!");
@@ -2019,6 +2128,7 @@ function criarOuVerificarAbaRelatoriosDiarios() {
     Logger.log("📝 Criando aba RelatoriosDiarios...");
     sheet = doc.insertSheet("RelatoriosDiarios");
 
+    // Cabeçalho
     sheet.getRange(1, 1, 1, 5).setValues([
       ["Data", "Cliente", "Marca", "Valor", "Tipo"]
     ]);
@@ -2031,6 +2141,137 @@ function criarOuVerificarAbaRelatoriosDiarios() {
   }
 
   return sheet;
+}
+
+/**
+ * Remove dados duplicados da aba RelatoriosDiarios
+ * Mantém apenas um registro único por data/cliente/marca/tipo
+ */
+function limparDadosDuplicados() {
+  try {
+    Logger.log("🧹 Iniciando limpeza de dados duplicados...");
+
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+
+    if (!sheet) {
+      Logger.log("⚠️ Aba RelatoriosDiarios não encontrada");
+      return;
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      Logger.log("ℹ️ Aba vazia, nada para limpar");
+      return;
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    var vistos = {};
+    var linhasParaRemover = [];
+
+    // Identifica linhas duplicadas (de baixo para cima para não afetar índices)
+    for (var i = dados.length - 1; i >= 0; i--) {
+      var row = dados[i];
+      var dataRow = row[0];
+
+      // Converte data para string se necessário
+      if (dataRow instanceof Date) {
+        dataRow = Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy");
+      }
+
+      // Cria chave única: data|cliente|marca|tipo
+      var chave = dataRow + "|" + row[1] + "|" + row[2] + "|" + row[4];
+
+      if (vistos[chave]) {
+        // Duplicado encontrado - marcar para remoção (linha + 2 porque dados começa na linha 2)
+        linhasParaRemover.push(i + 2);
+      } else {
+        vistos[chave] = true;
+      }
+    }
+
+    // Remove linhas duplicadas (de cima para baixo para manter índices corretos)
+    linhasParaRemover.sort(function(a, b) { return b - a; });
+
+    linhasParaRemover.forEach(function(linha) {
+      sheet.deleteRow(linha);
+    });
+
+    Logger.log("✅ Limpeza concluída! " + linhasParaRemover.length + " registros duplicados removidos.");
+    Logger.log("📊 Registros únicos restantes: " + (lastRow - 1 - linhasParaRemover.length));
+
+    return linhasParaRemover.length;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao limpar duplicados: " + erro.toString());
+    return -1;
+  }
+}
+
+/**
+ * Salva dados diários na aba RelatoriosDiarios
+ * Chamada pelo trigger diário às 8h
+ */
+function salvarDadosDiarios() {
+  try {
+    Logger.log("📊 Iniciando salvamento de dados diários...");
+
+    var sheet = criarOuVerificarAbaRelatoriosDiarios();
+    var hoje = new Date();
+    var dataFormatada = Utilities.formatDate(hoje, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+    // Verifica se já existem dados para hoje (evita duplicação)
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      var dadosExistentes = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      var jaTemDadosHoje = dadosExistentes.some(function(row) {
+        var dataRow = row[0];
+        if (dataRow instanceof Date) {
+          return Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy") === dataFormatada;
+        }
+        return String(dataRow).trim() === dataFormatada;
+      });
+
+      if (jaTemDadosHoje) {
+        Logger.log("⚠️ Já existem dados salvos para " + dataFormatada + ". Pulando para evitar duplicação.");
+        Logger.log("💡 Se deseja resalvar, execute primeiro: limparDadosDuplicados()");
+        return false;
+      }
+    }
+
+    // 1. Pedidos a Faturar
+    var pedidos = getPedidosAFaturar();
+    if (pedidos.sucesso && pedidos.dados) {
+      pedidos.dados.forEach(function(item) {
+        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Pedido a Faturar"]);
+      });
+      Logger.log("✅ " + pedidos.dados.length + " pedidos salvos");
+    }
+
+    // 2. Entradas do Dia
+    var entradas = getEntradasDoDia();
+    if (entradas.sucesso && entradas.dados) {
+      entradas.dados.forEach(function(item) {
+        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Entrada do Dia"]);
+      });
+      Logger.log("✅ " + entradas.dados.length + " entradas salvas");
+    }
+
+    // 3. Faturamento do Dia
+    var faturamento = getUltimoFaturamento();
+    if (faturamento.sucesso && faturamento.dados) {
+      faturamento.dados.forEach(function(item) {
+        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Faturamento"]);
+      });
+      Logger.log("✅ " + faturamento.dados.length + " faturamentos salvos");
+    }
+
+    Logger.log("✅ Dados diários salvos com sucesso!");
+    return true;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao salvar dados diários: " + erro.toString());
+    return false;
+  }
 }
 
 /**
@@ -2070,7 +2311,156 @@ function buscarEmailsDestinatarios() {
 }
 
 /**
- * Calcula total de faturamento da semana
+ * Busca dados para o email:
+ * - Pedidos: situação ATUAL (getPedidosAFaturar)
+ * - Entradas: do dia ANTERIOR (da aba RelatoriosDiarios)
+ * - Faturamento: do dia ANTERIOR (da aba HistoricoFaturamento)
+ */
+function buscarDadosAtuais() {
+  try {
+    Logger.log("📊 Buscando dados para email...");
+
+    var ontem = new Date();
+    ontem.setDate(ontem.getDate() - 1);
+    var dataOntem = Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+    Logger.log("📅 Buscando dados de ontem: " + dataOntem);
+
+    // 1. Pedidos a Faturar (situação ATUAL)
+    var pedidosResult = getPedidosAFaturar();
+    var pedidos = [];
+    if (pedidosResult.sucesso && pedidosResult.dados) {
+      pedidos = pedidosResult.dados.map(function(item) {
+        return {
+          cliente: item.cliente,
+          marca: item.marca,
+          valor: item.valor
+        };
+      });
+    }
+    Logger.log("✅ Pedidos (atual): " + pedidos.length + " encontrados");
+
+    // 2. Entradas do Dia ANTERIOR (da aba RelatoriosDiarios)
+    var entradas = buscarEntradasDeOntem(dataOntem);
+    Logger.log("✅ Entradas (ontem): " + entradas.length + " encontradas");
+
+    // 3. Faturamento do Dia ANTERIOR (da aba HistoricoFaturamento)
+    var faturamento = buscarFaturamentoDeOntem(dataOntem);
+    Logger.log("✅ Faturamento (ontem): " + faturamento.length + " encontrados");
+
+    return {
+      pedidos: pedidos,
+      entradas: entradas,
+      faturamento: faturamento,
+      data: dataOntem
+    };
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao buscar dados: " + erro.toString());
+    return {pedidos: [], entradas: [], faturamento: [], data: ""};
+  }
+}
+
+/**
+ * Busca entradas de uma data específica (da aba RelatoriosDiarios)
+ */
+function buscarEntradasDeOntem(dataOntem) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+
+    if (!sheet) {
+      Logger.log("⚠️ Aba RelatoriosDiarios não encontrada");
+      return [];
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return [];
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    var entradas = [];
+
+    dados.forEach(function(row) {
+      var dataRow = row[0];
+      var dataRowFormatada;
+
+      if (dataRow instanceof Date) {
+        dataRowFormatada = Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy");
+      } else if (typeof dataRow === 'string') {
+        dataRowFormatada = dataRow.trim();
+      } else {
+        dataRowFormatada = String(dataRow);
+      }
+
+      if (dataRowFormatada === dataOntem && row[4] === "Entrada do Dia") {
+        entradas.push({
+          cliente: row[1],
+          marca: row[2],
+          valor: row[3]
+        });
+      }
+    });
+
+    return entradas;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao buscar entradas de ontem: " + erro.toString());
+    return [];
+  }
+}
+
+/**
+ * Busca faturamento de uma data específica (da aba HistoricoFaturamento)
+ */
+function buscarFaturamentoDeOntem(dataOntem) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("HistoricoFaturamento");
+
+    if (!sheet) {
+      Logger.log("⚠️ Aba HistoricoFaturamento não encontrada");
+      return [];
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return [];
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 4).getValues();
+    var faturamento = [];
+
+    dados.forEach(function(row) {
+      var dataRow = row[0];
+      var dataRowFormatada;
+
+      if (dataRow instanceof Date) {
+        dataRowFormatada = Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy");
+      } else if (typeof dataRow === 'string') {
+        dataRowFormatada = dataRow.trim();
+      } else {
+        dataRowFormatada = String(dataRow);
+      }
+
+      if (dataRowFormatada === dataOntem) {
+        faturamento.push({
+          cliente: row[1],
+          marca: row[2],
+          valor: typeof row[3] === 'number' ? row[3] : parseFloat(row[3]) || 0
+        });
+      }
+    });
+
+    return faturamento;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao buscar faturamento de ontem: " + erro.toString());
+    return [];
+  }
+}
+
+/**
+ * Calcula total de faturamento da semana (da aba HistoricoFaturamento)
  */
 function calcularTotalSemanaHistorico() {
   try {
@@ -2081,13 +2471,15 @@ function calcularTotalSemanaHistorico() {
     }
 
     var hoje = new Date();
-    var diaDaSemana = hoje.getDay();
+    var diaDaSemana = hoje.getDay(); // 0=domingo, 1=segunda, etc
 
+    // Calcula segunda-feira da semana atual
     var segunda = new Date(hoje);
     var diasAteSegunda = (diaDaSemana === 0) ? -6 : -(diaDaSemana - 1);
     segunda.setDate(hoje.getDate() + diasAteSegunda);
     segunda.setHours(0, 0, 0, 0);
 
+    // Calcula domingo da semana atual
     var domingo = new Date(segunda);
     domingo.setDate(segunda.getDate() + 6);
     domingo.setHours(23, 59, 59, 999);
@@ -2122,7 +2514,7 @@ function calcularTotalSemanaHistorico() {
 }
 
 /**
- * Calcula total de faturamento do mês
+ * Calcula total de faturamento do mês (da aba HistoricoFaturamento)
  */
 function calcularTotalMesHistorico() {
   try {
@@ -2165,6 +2557,533 @@ function calcularTotalMesHistorico() {
   }
 }
 
+/**
+ * Busca dados do dia anterior na aba RelatoriosDiarios
+ */
+function buscarDadosDiaAnterior() {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+
+    if (!sheet) {
+      Logger.log("⚠️ Aba RelatoriosDiarios não encontrada");
+      return {pedidos: [], entradas: [], faturamento: []};
+    }
+
+    var ontem = new Date();
+    ontem.setDate(ontem.getDate() - 1);
+    var dataOntem = Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return {pedidos: [], entradas: [], faturamento: []};
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+
+    var pedidos = [];
+    var entradas = [];
+    var faturamento = [];
+
+    dados.forEach(function(row) {
+      // Converte a data da planilha para string no formato dd/MM/yyyy
+      var dataRow = row[0];
+      var dataRowFormatada;
+
+      if (dataRow instanceof Date) {
+        // Se for objeto Date, formata para string
+        dataRowFormatada = Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy");
+      } else if (typeof dataRow === 'string') {
+        // Se já for string, usa diretamente
+        dataRowFormatada = dataRow.trim();
+      } else {
+        // Outro tipo, converte para string
+        dataRowFormatada = String(dataRow);
+      }
+
+      if (dataRowFormatada === dataOntem) {
+        var item = {
+          cliente: row[1],
+          marca: row[2],
+          valor: row[3]
+        };
+
+        if (row[4] === "Pedido a Faturar") {
+          pedidos.push(item);
+        } else if (row[4] === "Entrada do Dia") {
+          entradas.push(item);
+        } else if (row[4] === "Faturamento") {
+          faturamento.push(item);
+        }
+      }
+    });
+
+    Logger.log("✅ Dados de ontem (" + dataOntem + "): " + pedidos.length + " pedidos, " + entradas.length + " entradas, " + faturamento.length + " faturamentos");
+
+    return {
+      pedidos: pedidos,
+      entradas: entradas,
+      faturamento: faturamento,
+      data: dataOntem
+    };
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao buscar dados de ontem: " + erro.toString());
+    return {pedidos: [], entradas: [], faturamento: []};
+  }
+}
+
+/**
+ * Calcula total da semana (segunda a domingo)
+ */
+function calcularTotalSemana() {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+
+    if (!sheet) {
+      return 0;
+    }
+
+    var hoje = new Date();
+    var diaDaSemana = hoje.getDay(); // 0=domingo, 1=segunda, etc
+
+    // Calcula segunda-feira da semana atual
+    var segunda = new Date(hoje);
+    var diasAteSegunda = (diaDaSemana === 0) ? -6 : -(diaDaSemana - 1);
+    segunda.setDate(hoje.getDate() + diasAteSegunda);
+    segunda.setHours(0, 0, 0, 0);
+
+    // Calcula domingo da semana atual
+    var domingo = new Date(segunda);
+    domingo.setDate(segunda.getDate() + 6);
+    domingo.setHours(23, 59, 59, 999);
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return 0;
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    var total = 0;
+
+    dados.forEach(function(row) {
+      var dataRow = row[0];
+      if (typeof dataRow === 'string') {
+        var partes = dataRow.split('/');
+        dataRow = new Date(partes[2], partes[1] - 1, partes[0]);
+      }
+
+      if (dataRow >= segunda && dataRow <= domingo && row[4] === "Faturamento") {
+        total += row[3];
+      }
+    });
+
+    Logger.log("✅ Total da semana: R$ " + total.toFixed(2));
+    return total;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao calcular total da semana: " + erro.toString());
+    return 0;
+  }
+}
+
+/**
+ * Calcula total do mês acumulado
+ */
+function calcularTotalMes() {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+
+    if (!sheet) {
+      return 0;
+    }
+
+    var hoje = new Date();
+    var mesAtual = hoje.getMonth();
+    var anoAtual = hoje.getFullYear();
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return 0;
+    }
+
+    var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+    var total = 0;
+
+    dados.forEach(function(row) {
+      var dataRow = row[0];
+      if (typeof dataRow === 'string') {
+        var partes = dataRow.split('/');
+        dataRow = new Date(partes[2], partes[1] - 1, partes[0]);
+      }
+
+      if (dataRow.getMonth() === mesAtual && dataRow.getFullYear() === anoAtual && row[4] === "Faturamento") {
+        total += row[3];
+      }
+    });
+
+    Logger.log("✅ Total do mês: R$ " + total.toFixed(2));
+    return total;
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao calcular total do mês: " + erro.toString());
+    return 0;
+  }
+}
+
+/**
+ * Formata email HTML com os dados
+ */
+function formatarEmailRelatorio(dados, totalSemana, totalMes) {
+  var html = '<html><body style="font-family: Arial, sans-serif; color: #333;">';
+
+  html += '<p style="font-size: 16px;">Bom dia!</p>';
+  html += '<p style="font-size: 14px;">Segue informações de pedidos e Faturamento Bahia para data de <strong>' + dados.data + '</strong></p>';
+
+  // Card: Pedidos a Faturar
+  html += '<h3 style="color: #2c3e50; border-bottom: 2px solid #3498db;">💼 Pedidos a Faturar</h3>';
+  if (dados.pedidos.length > 0) {
+    html += '<table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">';
+    html += '<thead><tr style="background-color: #3498db; color: white;">';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Cliente</th>';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Marca</th>';
+    html += '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Valor</th>';
+    html += '</tr></thead><tbody>';
+
+    var totalPedidos = 0;
+    dados.pedidos.forEach(function(item) {
+      html += '<tr>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.cliente + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.marca + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd; text-align: right;">R$ ' + item.valor.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+      html += '</tr>';
+      totalPedidos += item.valor;
+    });
+
+    html += '<tr style="background-color: #ecf0f1; font-weight: bold;">';
+    html += '<td colspan="2" style="padding: 10px; border: 1px solid #ddd;">TOTAL</td>';
+    html += '<td style="padding: 10px; border: 1px solid #ddd; text-align: right;">R$ ' + totalPedidos.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+    html += '</tr></tbody></table>';
+  } else {
+    html += '<p style="color: #95a5a6;">Nenhum pedido a faturar</p>';
+  }
+
+  // Card: Entradas do Dia
+  html += '<h3 style="color: #2c3e50; border-bottom: 2px solid #27ae60;">📦 Entradas do Dia</h3>';
+  if (dados.entradas.length > 0) {
+    html += '<table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">';
+    html += '<thead><tr style="background-color: #27ae60; color: white;">';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Cliente</th>';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Marca</th>';
+    html += '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Valor</th>';
+    html += '</tr></thead><tbody>';
+
+    var totalEntradas = 0;
+    dados.entradas.forEach(function(item) {
+      html += '<tr>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.cliente + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.marca + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd; text-align: right;">R$ ' + item.valor.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+      html += '</tr>';
+      totalEntradas += item.valor;
+    });
+
+    html += '<tr style="background-color: #ecf0f1; font-weight: bold;">';
+    html += '<td colspan="2" style="padding: 10px; border: 1px solid #ddd;">TOTAL</td>';
+    html += '<td style="padding: 10px; border: 1px solid #ddd; text-align: right;">R$ ' + totalEntradas.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+    html += '</tr></tbody></table>';
+  } else {
+    html += '<p style="color: #95a5a6;">Nenhuma entrada no dia</p>';
+  }
+
+  // Card: Faturamento do Dia
+  html += '<h3 style="color: #2c3e50; border-bottom: 2px solid #e74c3c;">💰 Faturamento do Dia</h3>';
+  if (dados.faturamento.length > 0) {
+    html += '<table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">';
+    html += '<thead><tr style="background-color: #e74c3c; color: white;">';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Cliente</th>';
+    html += '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Marca</th>';
+    html += '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Valor</th>';
+    html += '</tr></thead><tbody>';
+
+    var totalFaturamento = 0;
+    dados.faturamento.forEach(function(item) {
+      html += '<tr>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.cliente + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd;">' + item.marca + '</td>';
+      html += '<td style="padding: 8px; border: 1px solid #ddd; text-align: right;">R$ ' + item.valor.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+      html += '</tr>';
+      totalFaturamento += item.valor;
+    });
+
+    html += '<tr style="background-color: #ecf0f1; font-weight: bold;">';
+    html += '<td colspan="2" style="padding: 10px; border: 1px solid #ddd;">TOTAL</td>';
+    html += '<td style="padding: 10px; border: 1px solid #ddd; text-align: right;">R$ ' + totalFaturamento.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+    html += '</tr></tbody></table>';
+  } else {
+    html += '<p style="color: #95a5a6;">Nenhum faturamento no dia</p>';
+  }
+
+  // Totais da Semana e Mês
+  html += '<hr style="margin: 30px 0; border: none; border-top: 2px solid #bdc3c7;">';
+  html += '<h3 style="color: #2c3e50;">📊 Resumo</h3>';
+  html += '<table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">';
+  html += '<tr style="background-color: #f39c12; color: white;">';
+  html += '<td style="padding: 12px; border: 1px solid #ddd; font-weight: bold;">Total da Semana (Segunda a Domingo)</td>';
+  html += '<td style="padding: 12px; border: 1px solid #ddd; text-align: right; font-weight: bold;">R$ ' + totalSemana.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+  html += '</tr>';
+  html += '<tr style="background-color: #9b59b6; color: white;">';
+  html += '<td style="padding: 12px; border: 1px solid #ddd; font-weight: bold;">Total do Mês Acumulado</td>';
+  html += '<td style="padding: 12px; border: 1px solid #ddd; text-align: right; font-weight: bold;">R$ ' + totalMes.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '</td>';
+  html += '</tr>';
+  html += '</table>';
+
+  // Assinatura
+  html += '<p style="margin-top: 30px; font-size: 14px;">Atenciosamente,<br>';
+  html += '<strong>Controle de Rotinas e Prazos Marfim</strong></p>';
+
+  html += '</body></html>';
+
+  return html;
+}
+
+/**
+ * Função principal: Envia relatório por email
+ * Deve ser configurada para rodar às 8h diariamente
+ */
+function enviarRelatorioEmail() {
+  try {
+    Logger.log("📧 Iniciando envio de relatório por email...");
+
+    // 1. Salva dados de hoje na aba RelatoriosDiarios (para histórico)
+    salvarDadosDiarios();
+
+    // 2. Busca dados ATUAIS das fontes corretas
+    var dadosAtuais = buscarDadosAtuais();
+
+    if (dadosAtuais.pedidos.length === 0 && dadosAtuais.entradas.length === 0 && dadosAtuais.faturamento.length === 0) {
+      Logger.log("⚠️ Nenhum dado encontrado. Email não será enviado.");
+      return;
+    }
+
+    // 3. Calcula totais da aba HistoricoFaturamento
+    var totalSemana = calcularTotalSemanaHistorico();
+    var totalMes = calcularTotalMesHistorico();
+
+    // 4. Formata email
+    var htmlBody = formatarEmailRelatorio(dadosAtuais, totalSemana, totalMes);
+
+    // 5. Busca emails destinatários
+    var emails = buscarEmailsDestinatarios();
+
+    if (emails.length === 0) {
+      Logger.log("⚠️ Nenhum email destinatário encontrado");
+      return;
+    }
+
+    // 6. Envia email
+    var assunto = "Pedidos e Faturamento atualizado BAHIA";
+
+    emails.forEach(function(email) {
+      MailApp.sendEmail({
+        to: email,
+        subject: assunto,
+        htmlBody: htmlBody
+      });
+      Logger.log("✅ Email enviado para: " + email);
+    });
+
+    Logger.log("🎉 Relatório enviado com sucesso para " + emails.length + " destinatários!");
+
+  } catch (erro) {
+    Logger.log("❌ Erro ao enviar relatório: " + erro.toString());
+  }
+}
+
+/**
+ * Função de DIAGNÓSTICO - Verifica configuração do sistema de email
+ * Execute esta função para ver o que está faltando
+ */
+function diagnosticarSistemaEmail() {
+  Logger.log("🔍 === DIAGNÓSTICO DO SISTEMA DE EMAIL ===");
+
+  var problemas = [];
+  var ok = [];
+
+  // 1. Verifica aba "email"
+  var sheetEmail = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("email");
+  if (!sheetEmail) {
+    problemas.push("❌ Aba 'email' não encontrada! Crie uma aba chamada 'email' com emails na coluna A");
+  } else {
+    var lastRowEmail = sheetEmail.getLastRow();
+    if (lastRowEmail < 2) {
+      problemas.push("❌ Aba 'email' está vazia! Adicione emails na coluna A");
+    } else {
+      var emails = buscarEmailsDestinatarios();
+      ok.push("✅ Aba 'email' encontrada com " + emails.length + " emails: " + emails.join(", "));
+    }
+  }
+
+  // 2. Verifica aba "RelatoriosDiarios"
+  var sheetRelatorios = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("RelatoriosDiarios");
+  if (!sheetRelatorios) {
+    problemas.push("⚠️ Aba 'RelatoriosDiarios' não existe ainda (será criada automaticamente)");
+  } else {
+    var lastRowRel = sheetRelatorios.getLastRow();
+    if (lastRowRel < 2) {
+      problemas.push("⚠️ Aba 'RelatoriosDiarios' está vazia. Execute: salvarDadosDiarios() para popular");
+    } else {
+      ok.push("✅ Aba 'RelatoriosDiarios' tem " + (lastRowRel - 1) + " registros");
+    }
+  }
+
+  // 3. Verifica dados de ontem
+  var dadosOntem = buscarDadosDiaAnterior();
+  var ontem = new Date();
+  ontem.setDate(ontem.getDate() - 1);
+  var dataOntem = Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
+
+  if (!dadosOntem.pedidos || dadosOntem.pedidos.length === 0) {
+    problemas.push("⚠️ Nenhum 'Pedido a Faturar' encontrado para " + dataOntem);
+  } else {
+    ok.push("✅ " + dadosOntem.pedidos.length + " pedidos de " + dataOntem);
+  }
+
+  if (!dadosOntem.entradas || dadosOntem.entradas.length === 0) {
+    problemas.push("⚠️ Nenhuma 'Entrada do Dia' encontrada para " + dataOntem);
+  } else {
+    ok.push("✅ " + dadosOntem.entradas.length + " entradas de " + dataOntem);
+  }
+
+  if (!dadosOntem.faturamento || dadosOntem.faturamento.length === 0) {
+    problemas.push("⚠️ Nenhum 'Faturamento' encontrado para " + dataOntem);
+  } else {
+    ok.push("✅ " + dadosOntem.faturamento.length + " faturamentos de " + dataOntem);
+  }
+
+  // 4. Verifica trigger
+  var triggers = ScriptApp.getProjectTriggers();
+  var temTriggerEmail = false;
+  triggers.forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === "enviarRelatorioEmail") {
+      temTriggerEmail = true;
+      ok.push("✅ Trigger configurado: " + trigger.getHandlerFunction());
+    }
+  });
+
+  if (!temTriggerEmail) {
+    problemas.push("❌ TRIGGER NÃO CONFIGURADO! Configure um trigger diário para 'enviarRelatorioEmail' às 8h");
+  }
+
+  // Exibe resultados
+  Logger.log("\n📊 === RESULTADO DO DIAGNÓSTICO ===\n");
+
+  if (ok.length > 0) {
+    Logger.log("✅ ITENS OK:");
+    ok.forEach(function(item) { Logger.log("   " + item); });
+  }
+
+  if (problemas.length > 0) {
+    Logger.log("\n❌ PROBLEMAS ENCONTRADOS:");
+    problemas.forEach(function(item) { Logger.log("   " + item); });
+  }
+
+  if (problemas.length === 0) {
+    Logger.log("\n🎉 TUDO OK! Sistema pronto para enviar emails!");
+  } else {
+    Logger.log("\n⚠️ Corrija os problemas acima para o sistema funcionar corretamente");
+  }
+
+  Logger.log("\n💡 PRÓXIMOS PASSOS:");
+  Logger.log("   1. Corrija os problemas encontrados");
+  Logger.log("   2. Execute: testarEnvioEmailManual() para enviar um email de teste");
+  Logger.log("   3. Configure o trigger para envio automático diário");
+}
+
+/**
+ * Função de TESTE - Envia email manualmente AGORA (não espera trigger)
+ * Use para testar se o email está funcionando
+ */
+function testarEnvioEmailManual() {
+  try {
+    Logger.log("🧪 === TESTE DE ENVIO DE EMAIL ===");
+
+    // Busca emails
+    var emails = buscarEmailsDestinatarios();
+    if (emails.length === 0) {
+      Logger.log("❌ Nenhum email encontrado na aba 'email'");
+      return;
+    }
+
+    Logger.log("📧 Emails encontrados: " + emails.join(", "));
+
+    // Busca dados ATUAIS das fontes corretas (não mais da aba RelatoriosDiarios)
+    var dadosAtuais = buscarDadosAtuais();
+
+    var totalItens = (dadosAtuais.pedidos ? dadosAtuais.pedidos.length : 0) +
+                     (dadosAtuais.entradas ? dadosAtuais.entradas.length : 0) +
+                     (dadosAtuais.faturamento ? dadosAtuais.faturamento.length : 0);
+
+    if (totalItens === 0) {
+      Logger.log("⚠️ ATENÇÃO: Nenhum dado encontrado!");
+      Logger.log("💡 Verifique se existem dados nas abas de origem");
+      return;
+    }
+
+    Logger.log("📊 Dados atuais: " + dadosAtuais.pedidos.length + " pedidos, " +
+               dadosAtuais.entradas.length + " entradas, " +
+               dadosAtuais.faturamento.length + " faturamentos");
+
+    // Calcula totais da aba HistoricoFaturamento
+    var totalSemana = calcularTotalSemanaHistorico();
+    var totalMes = calcularTotalMesHistorico();
+
+    Logger.log("💰 Total semana: R$ " + totalSemana.toFixed(2));
+    Logger.log("💰 Total mês: R$ " + totalMes.toFixed(2));
+
+    // Formata email
+    var htmlBody = formatarEmailRelatorio(dadosAtuais, totalSemana, totalMes);
+    var assunto = "Pedidos e Faturamento atualizado BAHIA - TESTE";
+
+    // Envia
+    emails.forEach(function(email) {
+      MailApp.sendEmail({
+        to: email,
+        subject: assunto,
+        htmlBody: htmlBody
+      });
+      Logger.log("✅ Email de TESTE enviado para: " + email);
+    });
+
+    Logger.log("🎉 Email de teste enviado com sucesso!");
+    Logger.log("📬 Verifique sua caixa de entrada (pode demorar alguns minutos)");
+
+  } catch (erro) {
+    Logger.log("❌ Erro no teste: " + erro.toString());
+  }
+}
+
+/**
+ * Função AUXILIAR - Salva dados de hoje na aba RelatoriosDiarios
+ * Execute se a aba estiver vazia
+ */
+function salvarDadosHojeManualmente() {
+  try {
+    Logger.log("💾 Salvando dados de hoje na aba RelatoriosDiarios...");
+
+    var sucesso = salvarDadosDiarios();
+
+    if (sucesso) {
+      Logger.log("✅ Dados salvos com sucesso!");
+      Logger.log("💡 Agora você pode executar: diagnosticarSistemaEmail()");
+    } else {
+      Logger.log("❌ Erro ao salvar dados");
+    }
+
+  } catch (erro) {
+    Logger.log("❌ Erro: " + erro.toString());
+  }
+}
+
 // ========================================
 // DEMANDA POR MARCA - TOTAL_FABRICA
 // ========================================
@@ -2201,6 +3120,7 @@ function getDemandaPorMarca() {
       };
     }
 
+    // Busca cabeçalho (primeira linha) e formata datas
     var cabecalhoRaw = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
     var cabecalho = cabecalhoRaw.map(function(celula) {
       if (celula instanceof Date) {
@@ -2211,16 +3131,20 @@ function getDemandaPorMarca() {
 
     Logger.log("📋 Cabeçalho: " + JSON.stringify(cabecalho));
 
+    // Busca dados (a partir da linha 2)
     var dados = [];
     if (lastRow > 1) {
       dados = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
     }
 
+    // Formata as datas e valores para exibição
     var dadosFormatados = dados.map(function(linha) {
       return linha.map(function(celula) {
+        // Se for uma data, formata
         if (celula instanceof Date) {
           return Utilities.formatDate(celula, Session.getScriptTimeZone(), "dd/MM/yyyy");
         }
+        // Retorna valor ou string vazia
         return celula !== null && celula !== undefined ? celula : "";
       });
     });
