@@ -101,6 +101,11 @@ def extrair_lotes_dilly(texto_completo, ordem_compra):
     lotes_itens = []
 
     lote_matches = list(re.finditer(r'Lote:\s*(\d+)', texto_completo))
+    print(f"  [DEBUG] Lotes encontrados: {len(lote_matches)} {[m.group(1) for m in lote_matches]}")
+    if not lote_matches:
+        # Mostra trecho do texto para diagnóstico
+        print(f"  [DEBUG] Primeiros 500 chars do texto:\n{texto_completo[:500]}")
+
     for i, lote_match in enumerate(lote_matches):
         numero_lote = lote_match.group(1)
         inicio = lote_match.start()
@@ -108,6 +113,9 @@ def extrair_lotes_dilly(texto_completo, ordem_compra):
         secao = texto_completo[inicio:fim]
 
         linhas = secao.split('\n')
+        print(f"  [DEBUG] Lote {numero_lote}: {len(linhas)} linhas. Primeiras 5:")
+        for dbg in linhas[:5]:
+            print(f"    | {repr(dbg)}")
         j = 0
         while j < len(linhas):
             linha = linhas[j].strip()
