@@ -101,11 +101,6 @@ def extrair_lotes_dilly(texto_completo, ordem_compra):
     lotes_itens = []
 
     lote_matches = list(re.finditer(r'Lote:\s*(\d+)', texto_completo))
-    print(f"  [DEBUG] Lotes encontrados: {len(lote_matches)} {[m.group(1) for m in lote_matches]}")
-    if not lote_matches:
-        # Mostra trecho do texto para diagnóstico
-        print(f"  [DEBUG] Primeiros 500 chars do texto:\n{texto_completo[:500]}")
-
     for i, lote_match in enumerate(lote_matches):
         numero_lote = lote_match.group(1)
         inicio = lote_match.start()
@@ -113,9 +108,6 @@ def extrair_lotes_dilly(texto_completo, ordem_compra):
         secao = texto_completo[inicio:fim]
 
         linhas = secao.split('\n')
-        print(f"  [DEBUG] Lote {numero_lote}: {len(linhas)} linhas. Primeiras 5:")
-        for dbg in linhas[:5]:
-            print(f"    | {repr(dbg)}")
         j = 0
         while j < len(linhas):
             linha = linhas[j].strip()
@@ -343,6 +335,7 @@ def main():
     log = carregar_log()
     ocs_enviadas = [item['oc'] for item in log]
     todos_pedidos_para_envio = []
+    todos_lotes_para_envio = []
     arquivos_para_mover = []
     arquivos = [f for f in os.listdir(PASTA_ENTRADA) if f.lower().endswith('.pdf')]
 
@@ -355,30 +348,26 @@ def main():
         lista_pedidos = processar_pdf_inteligente(os.path.join(PASTA_ENTRADA, arq), arq)
         if lista_pedidos:
             for p in lista_pedidos:
+                # Lotes são coletados sempre — deduplicação acontece no Google Sheets
+                todos_lotes_para_envio.extend(p.pop("_lotes", []))
                 if p['ordemCompra'] in ocs_enviadas:
                     print(f"⏭️  OC {p['ordemCompra']} já enviada anteriormente. Pulando.")
                     continue
                 todos_pedidos_para_envio.append(p)
-                # RESTAURADO: Seu print detalhado original
                 print(f"✅ {p['dataRecebimento']:<12} | {p['dataPedido']:<12} | {p['ordemCompra']:<12} | {p['cliente'][:15]:<15} | {p['marca'][:15]:<15} | {p['valor']}")
             arquivos_para_mover.append(arq)
         else:
             print(f"⚠️  Ignorado: {arq}")
 
-    if todos_pedidos_para_envio:
+    if todos_pedidos_para_envio or todos_lotes_para_envio:
         print("-" * 95)
-        todos_lotes_para_envio = []
-        for p in todos_pedidos_para_envio:
-            todos_lotes_para_envio.extend(p.pop("_lotes", []))
-
         print(f"📤 Enviando {len(todos_pedidos_para_envio)} pedidos e {len(todos_lotes_para_envio)} itens de lote para Google Sheets...")
         try:
-            payload = {"pedidos": todos_pedidos_para_envio}
-            if todos_lotes_para_envio:
-                payload["lotes"] = todos_lotes_para_envio
+            payload = {"pedidos": todos_pedidos_para_envio, "lotes": todos_lotes_para_envio}
             response = requests.post(URL_WEBAPP, json=payload, timeout=30)
             if response.status_code == 200:
-                salvar_no_log(todos_pedidos_para_envio)
+                if todos_pedidos_para_envio:
+                    salvar_no_log(todos_pedidos_para_envio)
                 print(f"☁️  SUCESSO! Google recebeu os dados.")
                 mover_arquivos_processados(arquivos_para_mover)
             else:
