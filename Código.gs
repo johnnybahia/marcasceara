@@ -217,7 +217,18 @@ function doPost(e) {
 
     if (novasLinhas.length > 0) {
       sheet.getRange(ultimaLinha + 1, 1, novasLinhas.length, 11).setValues(novasLinhas);
-      return ContentService.createTextOutput(JSON.stringify({"status":"Sucesso", "msg": novasLinhas.length + " novos."})).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    var lotesAdicionados = 0;
+    if (json.lotes && json.lotes.length > 0) {
+      lotesAdicionados = salvarLotes(doc, json.lotes);
+    }
+
+    if (novasLinhas.length > 0 || lotesAdicionados > 0) {
+      return ContentService.createTextOutput(JSON.stringify({
+        "status": "Sucesso",
+        "msg": novasLinhas.length + " pedidos novos, " + lotesAdicionados + " itens de lote salvos."
+      })).setMimeType(ContentService.MimeType.JSON);
     } else {
       return ContentService.createTextOutput(JSON.stringify({"status":"Neutro", "msg": "Sem novidades."})).setMimeType(ContentService.MimeType.JSON);
     }
@@ -227,6 +238,55 @@ function doPost(e) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Salva os itens de lote Dilly na aba "Lotes_OC".
+ * Colunas: OC | Lote | Código | Descrição | Tamanho | Largura | Qtd
+ * Evita duplicatas verificando OC+Lote+Código+Tamanho já existentes.
+ */
+function salvarLotes(doc, lotes) {
+  var sheetLotes = doc.getSheetByName("Lotes_OC");
+  if (!sheetLotes) {
+    sheetLotes = doc.insertSheet("Lotes_OC");
+    sheetLotes.appendRow(["OC", "Lote", "Código", "Descrição", "Tamanho", "Largura", "Qtd"]);
+    sheetLotes.setFrozenRows(1);
+  }
+
+  // Monta conjunto de chaves já existentes para deduplicação
+  var ultimaLinha = sheetLotes.getLastRow();
+  var chavesExistentes = {};
+  if (ultimaLinha > 1) {
+    var dadosExistentes = sheetLotes.getRange(2, 1, ultimaLinha - 1, 7).getValues();
+    dadosExistentes.forEach(function(row) {
+      var chave = [row[0], row[1], row[2], row[4]].join("|");
+      chavesExistentes[chave] = true;
+    });
+  }
+
+  var novasLinhas = [];
+  lotes.forEach(function(item) {
+    var chave = [item.oc, item.lote, item.codigo, item.tamanho || ""].join("|");
+    if (!chavesExistentes[chave]) {
+      novasLinhas.push([
+        item.oc,
+        item.lote,
+        item.codigo,
+        item.descricao || "",
+        item.tamanho || "",
+        item.largura || "",
+        item.qtd || 0
+      ]);
+      chavesExistentes[chave] = true;
+    }
+  });
+
+  if (novasLinhas.length > 0) {
+    var primeiraLinhaVazia = sheetLotes.getLastRow() + 1;
+    sheetLotes.getRange(primeiraLinhaVazia, 1, novasLinhas.length, 7).setValues(novasLinhas);
+  }
+
+  return novasLinhas.length;
 }
 
 // 3. FUNÇÃO QUE O SITE CHAMA PARA PEGAR DADOS DA PLANILHA

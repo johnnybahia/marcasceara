@@ -96,38 +96,96 @@ def extrair_local_aniger(texto):
 
 # ================= PROCESSAMENTO POR CLIENTE =================
 
+def extrair_lotes_dilly(texto_completo, ordem_compra):
+    """Extrai cada item de cada lote da OC Dilly para envio à aba Lotes_OC."""
+    lotes_itens = []
+
+    lote_matches = list(re.finditer(r'Lote:\s*(\d+)', texto_completo))
+    for i, lote_match in enumerate(lote_matches):
+        numero_lote = lote_match.group(1)
+        inicio = lote_match.start()
+        fim = lote_matches[i + 1].start() if i + 1 < len(lote_matches) else len(texto_completo)
+        secao = texto_completo[inicio:fim]
+
+        linhas = secao.split('\n')
+        j = 0
+        while j < len(linhas):
+            linha = linhas[j].strip()
+            # Item line: 6-digit code + item num + description + "PR" unit + qty (X,XX) + price (X,XX)
+            m = re.match(r'^(\d{6})\s+\d+\s+(.+?)\s+PR\s+(\d+[,.]\d+)\s+\d+[,.]\d+', linha)
+            if m:
+                codigo = m.group(1)
+                descricao = re.sub(r'\s+', ' ', m.group(2)).strip()
+                qtd_str = m.group(3).replace(',', '.')
+                try:
+                    qtd = int(float(qtd_str))
+                except ValueError:
+                    qtd = 0
+
+                tamanho = ""
+                largura = ""
+                k = j + 1
+                while k < min(j + 6, len(linhas)):
+                    prox = linhas[k].strip()
+                    if re.match(r'^\d{6}\s+\d+', prox):
+                        break
+                    m_tam = re.match(r'Tamanho\s+(\S+)', prox)
+                    if m_tam:
+                        tamanho = m_tam.group(1)
+                    m_lar = re.match(r'Largura\s+(\S+)', prox)
+                    if m_lar:
+                        largura = m_lar.group(1)
+                    k += 1
+
+                lotes_itens.append({
+                    "oc": ordem_compra,
+                    "lote": numero_lote,
+                    "codigo": codigo,
+                    "descricao": descricao,
+                    "tamanho": tamanho,
+                    "largura": largura,
+                    "qtd": qtd
+                })
+            j += 1
+
+    return lotes_itens
+
+
 def processar_dilly(texto_completo, nome_arquivo):
     # Data de Emissão [cite: 4]
     match_emissao = re.search(r'Data Emissão:\s*(\d{2}/\d{2}/\d{4})', texto_completo)
     data_rec = match_emissao.group(1) if match_emissao else datetime.now().strftime("%d/%m/%Y")
-    
+
     # Data de Entrega (Previsão) [cite: 24]
     match_entrega_tab = re.search(r'Previsão.*?(\d{2}/\d{2}/\d{4})', texto_completo, re.DOTALL)
     data_ped = match_entrega_tab.group(1) if match_entrega_tab else data_rec
-    
-    # MELHORIA: Captura marca completa entre "Marca:" e "Ref.:" 
+
+    # MELHORIA: Captura marca completa entre "Marca:" e "Ref.:"
     match_marca = re.search(r'Marca:\s*(.*?)\s*Ref\.:', texto_completo, re.IGNORECASE)
     marca = match_marca.group(1).strip() if match_marca else "DILLY"
-    
-    # MELHORIA: Captura Quantidade Total no rodapé 
+
+    # MELHORIA: Captura Quantidade Total no rodapé
     match_qtd = re.search(r'Quantidade Total:\s*([\d\.,]+)', texto_completo)
     qtd = int(limpar_valor_monetario(match_qtd.group(1))) if match_qtd else 0
-    
+
     # Valor Total [cite: 194]
     match_valor = re.search(r'Total\s*R\$([\d\.,]+)', texto_completo)
     valor = limpar_valor_monetario(match_valor.group(1)) if match_valor else 0.0
-    
+
     # MELHORIA: Captura OC de 6 dígitos no topo [cite: 1]
     match_ordem = re.search(r'Ordem\s*Compra\s*(\d{6})', texto_completo, re.IGNORECASE)
     ordem_compra = match_ordem.group(1) if match_ordem else "N/D"
-    
+
     valor_formatado = f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    
+
+    lotes = extrair_lotes_dilly(texto_completo, ordem_compra)
+
     return {
         "dataPedido": data_ped, "dataRecebimento": data_rec, "arquivo": nome_arquivo,
         "cliente": "DILLY SPORTS", "marca": marca, "local": extrair_local_dilly(texto_completo),
         "qtd": qtd, "unidade": identificar_unidade(texto_completo),
-        "valor": valor_formatado, "ordemCompra": ordem_compra
+        "valor": valor_formatado, "ordemCompra": ordem_compra,
+        "_lotes": lotes
     }
 
 # (Funções processar_aniger, processar_dass e processar_dakota seguem a lógica original que você enviou)
@@ -301,9 +359,16 @@ def main():
 
     if todos_pedidos_para_envio:
         print("-" * 95)
-        print(f"📤 Enviando {len(todos_pedidos_para_envio)} pedidos para Google Sheets...")
+        todos_lotes_para_envio = []
+        for p in todos_pedidos_para_envio:
+            todos_lotes_para_envio.extend(p.pop("_lotes", []))
+
+        print(f"📤 Enviando {len(todos_pedidos_para_envio)} pedidos e {len(todos_lotes_para_envio)} itens de lote para Google Sheets...")
         try:
-            response = requests.post(URL_WEBAPP, json={"pedidos": todos_pedidos_para_envio}, timeout=30)
+            payload = {"pedidos": todos_pedidos_para_envio}
+            if todos_lotes_para_envio:
+                payload["lotes"] = todos_lotes_para_envio
+            response = requests.post(URL_WEBAPP, json=payload, timeout=30)
             if response.status_code == 200:
                 salvar_no_log(todos_pedidos_para_envio)
                 print(f"☁️  SUCESSO! Google recebeu os dados.")
