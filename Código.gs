@@ -422,12 +422,83 @@ function formatarValor(valor) {
 // SISTEMA DE FATURAMENTO
 // ========================================
 
+// ========================================
+// CACHE POR EXECUÇÃO + LOCK (evita estouro do limite de 6 min)
+// ========================================
+
+// Ligado só dentro de getFaturamentoDia: Dados1 e o mapa OC->Marca são lidos uma vez por execução.
+// Resultado vazio nunca é guardado, para o retry de agruparDados1PorOC continuar funcionando.
+var _cacheExecucao = null;
+
+function iniciarCacheExecucao() {
+  _cacheExecucao = {};
+}
+
+function encerrarCacheExecucao() {
+  _cacheExecucao = null;
+}
+
+/**
+ * Lock de verificação. Usa o lock do documento (o doPost do robô usa o do script,
+ * então os dois não se bloqueiam). Retorna null se já houver outra rodando.
+ */
+function adquirirLockVerificacao() {
+  var lock = LockService.getDocumentLock() || LockService.getScriptLock();
+  return lock.tryLock(10000) ? lock : null;
+}
+
+/**
+ * Remove de uma aba de histórico (A=Data ... E=Observação) as linhas automáticas
+ * (sem observação) de uma data. Lê a aba uma vez e apaga em blocos contíguos.
+ * @returns {number} Quantidade de linhas removidas
+ */
+function removerRegistrosAutomaticosDoDia(sheet, data) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+
+  var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  var linhas = [];
+
+  dados.forEach(function(row, index) {
+    var dataLinha = row[0];
+    if (dataLinha instanceof Date) {
+      var d = dataLinha;
+      dataLinha = ("0" + d.getDate()).slice(-2) + "/" +
+                  ("0" + (d.getMonth() + 1)).slice(-2) + "/" +
+                  d.getFullYear();
+    } else {
+      dataLinha = dataLinha.toString().trim();
+    }
+
+    if (dataLinha === data) {
+      var obs = row[4] ? row[4].toString().trim() : "";
+      if (obs === "") linhas.push(index + 2);
+    }
+  });
+
+  // De baixo para cima, agrupando linhas vizinhas numa única chamada
+  var fim = linhas.length - 1;
+  while (fim >= 0) {
+    var ini = fim;
+    while (ini > 0 && linhas[ini - 1] === linhas[ini] - 1) ini--;
+    sheet.deleteRows(linhas[ini], fim - ini + 1);
+    fim = ini - 1;
+  }
+
+  if (linhas.length > 0) {
+    Logger.log("🗑️ Removidos " + linhas.length + " registros automáticos de " + data);
+  }
+  return linhas.length;
+}
+
 /**
  * Lê dados da aba "Dados1" (ordem de compra, valor, cliente)
  * @returns {Array} Array de objetos com os dados
  */
 function lerDados1() {
   try {
+    if (_cacheExecucao && _cacheExecucao.dados1) return _cacheExecucao.dados1;
+
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados1");
     if (!sheet) {
       Logger.log("⚠️ Aba 'Dados1' não encontrada");
@@ -478,6 +549,7 @@ function lerDados1() {
     });
 
     Logger.log("✅ Lidos " + resultado.length + " registros da aba Dados1");
+    if (_cacheExecucao && resultado.length > 0) _cacheExecucao.dados1 = resultado;
     return resultado;
   } catch (erro) {
     Logger.log("❌ Erro ao ler Dados1: " + erro.toString());
@@ -560,6 +632,8 @@ function agruparDados1PorOC() {
  */
 function criarMapaOCMarca() {
   try {
+    if (_cacheExecucao && _cacheExecucao.mapaOCMarca) return _cacheExecucao.mapaOCMarca;
+
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados");
     if (!sheet) {
       Logger.log("⚠️ Aba 'Dados' não encontrada");
@@ -595,6 +669,7 @@ function criarMapaOCMarca() {
     });
 
     Logger.log("✅ Mapa criado com " + Object.keys(mapa).length + " OCs únicas de " + numLinhas + " linhas");
+    if (_cacheExecucao && contador > 0) _cacheExecucao.mapaOCMarca = mapa;
     return mapa;
 
   } catch (erro) {
@@ -762,9 +837,10 @@ function sincronizarOCsNaAbaControle(sheet) {
     // Lê o que já está na aba
     var lastRow = sheet.getLastRow();
     var dadosExistentes = {};
+    var dados = [];
 
     if (lastRow > 1) {
-      var dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+      dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
       dados.forEach(function(row, index) {
         var oc = row[0].toString().trim();
         dadosExistentes[oc] = {
@@ -785,17 +861,18 @@ function sincronizarOCsNaAbaControle(sheet) {
       var valorTotal = item.valor;
 
       if (dadosExistentes[oc]) {
-        // OC já existe - atualiza apenas valor total e saldo
+        // OC já existe - atualiza apenas valor total e saldo (em memória; gravado em bloco abaixo)
         var linha = dadosExistentes[oc].linha;
         var valorFaturado = dadosExistentes[oc].valorFaturado;
         var saldoRestante = valorTotal - valorFaturado;
         var percFaturado = valorTotal > 0 ? (valorFaturado / valorTotal * 100).toFixed(1) + "%" : "0%";
         var status = saldoRestante <= 0 ? "Faturado" : (valorFaturado > 0 ? "Parcial" : "Pendente");
 
-        sheet.getRange(linha, 4).setValue(valorTotal);  // Valor Total
-        sheet.getRange(linha, 6).setValue(saldoRestante);  // Saldo Restante
-        sheet.getRange(linha, 7).setValue(percFaturado);  // %
-        sheet.getRange(linha, 9).setValue(status);  // Status
+        var rowMem = dados[linha - 2];
+        rowMem[3] = valorTotal;      // Valor Total
+        rowMem[5] = saldoRestante;   // Saldo Restante
+        rowMem[6] = percFaturado;    // %
+        rowMem[8] = status;          // Status
 
         linhasAtualizadas++;
 
@@ -814,6 +891,15 @@ function sincronizarOCsNaAbaControle(sheet) {
         ]);
       }
     });
+
+    // Grava só as colunas calculadas (D, F:G, I), uma chamada por bloco.
+    // E (Valor Faturado) e H (Última Detecção) não são tocadas.
+    if (linhasAtualizadas > 0) {
+      var total = dados.length;
+      sheet.getRange(2, 4, total, 1).setValues(dados.map(function(r) { return [r[3]]; }));
+      sheet.getRange(2, 6, total, 2).setValues(dados.map(function(r) { return [r[5], r[6]]; }));
+      sheet.getRange(2, 9, total, 1).setValues(dados.map(function(r) { return [r[8]]; }));
+    }
 
     // Adiciona novas linhas
     if (novasLinhas.length > 0) {
@@ -917,22 +1003,30 @@ function aplicarFormatacaoCondicionalControle(sheet) {
     var lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
 
-    var dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+    // Coluna I (Status): lê status e cores atuais e regrava tudo em uma chamada por propriedade.
+    // Status desconhecido mantém a cor que já tinha.
+    var rangeStatus = sheet.getRange(2, 9, lastRow - 1, 1);
+    var status = rangeStatus.getValues();
+    var fundos = rangeStatus.getBackgrounds();
+    var fontes = rangeStatus.getFontColors();
 
-    dados.forEach(function(row, index) {
-      var linha = index + 2;
-      var status = row[8].toString();
-      var rangeStatus = sheet.getRange(linha, 9);
+    status.forEach(function(row, index) {
+      var s = row[0].toString();
 
-      // Cores por status
-      if (status === "Faturado") {
-        rangeStatus.setBackground("#4CAF50").setFontColor("#FFFFFF");
-      } else if (status === "Parcial") {
-        rangeStatus.setBackground("#FF9800").setFontColor("#FFFFFF");
-      } else if (status === "Pendente") {
-        rangeStatus.setBackground("#F5F5F5").setFontColor("#000000");
+      if (s === "Faturado") {
+        fundos[index][0] = "#4CAF50";
+        fontes[index][0] = "#FFFFFF";
+      } else if (s === "Parcial") {
+        fundos[index][0] = "#FF9800";
+        fontes[index][0] = "#FFFFFF";
+      } else if (s === "Pendente") {
+        fundos[index][0] = "#F5F5F5";
+        fontes[index][0] = "#000000";
       }
     });
+
+    rangeStatus.setBackgrounds(fundos);
+    rangeStatus.setFontColors(fontes);
 
   } catch (erro) {
     Logger.log("❌ Erro ao aplicar formatação: " + erro.toString());
@@ -1191,6 +1285,15 @@ function getEntradasDoDia() {
  * IMPORTANTE: Só atualiza snapshot quando chamado via trigger (não na webapp)
  */
 function getFaturamentoDia() {
+  iniciarCacheExecucao();
+  try {
+    return calcularFaturamentoDia();
+  } finally {
+    encerrarCacheExecucao();
+  }
+}
+
+function calcularFaturamentoDia() {
   try {
     Logger.log("💰 Iniciando getFaturamentoDia...");
 
@@ -1766,30 +1869,7 @@ function salvarFaturamentoNoHistorico(dados, data) {
 
     // Remove registros automáticos antigos que serão atualizados
     if (lastRow > 1) {
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheet.getRange(i, 1, 1, 6).getValues()[0];
-
-        // Normaliza data
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          var dia = ("0" + d.getDate()).slice(-2);
-          var mes = ("0" + (d.getMonth() + 1)).slice(-2);
-          var ano = d.getFullYear();
-          dataLinha = dia + "/" + mes + "/" + ano;
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        // Se é o mesmo dia e NÃO tem observação (automático)
-        if (dataLinha === data) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            Logger.log("🗑️ Removendo registro automático antigo linha " + i);
-            sheet.deleteRow(i);
-          }
-        }
-      }
+      removerRegistrosAutomaticosDoDia(sheet, data);
     }
 
     // Adiciona as novas linhas
@@ -1950,6 +2030,20 @@ function resetarAcumuladoFaturamento() {
  * USE ESTA FUNÇÃO PARA EXECUTAR MANUALMENTE
  */
 function executarVerificacaoFaturamento() {
+  var lock = adquirirLockVerificacao();
+  if (!lock) {
+    Logger.log("⏭️ Já existe uma verificação de faturamento em andamento. Esta execução foi ignorada.");
+    return { sucesso: false, dados: [], erro: "Verificação já em andamento." };
+  }
+
+  try {
+    return verificarFaturamentoComLog();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function verificarFaturamentoComLog() {
   Logger.log("🔄 Executando verificação manual de faturamento...");
 
   var resultado = getFaturamentoDia();
@@ -2123,6 +2217,20 @@ function setupTodosOsTriggers() {
  * USE QUANDO: Os cálculos ficaram errados ou tudo foi marcado como "Faturado" indevidamente
  */
 function corrigirFaturamento() {
+  var lock = adquirirLockVerificacao();
+  if (!lock) {
+    Logger.log("⏭️ Há uma verificação de faturamento em andamento. Tente novamente em instantes.");
+    return { sucesso: false, mensagem: "Há uma verificação de faturamento em andamento. Tente novamente em instantes." };
+  }
+
+  try {
+    return executarCorrecaoFaturamento();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function executarCorrecaoFaturamento() {
   try {
     Logger.log("🔧 === INICIANDO CORREÇÃO DE FATURAMENTO ===");
 
@@ -2165,26 +2273,7 @@ function corrigirFaturamento() {
       var lastRow = sheetHistorico.getLastRow();
       var removidos = 0;
 
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheetHistorico.getRange(i, 1, 1, 6).getValues()[0];
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          dataLinha = ("0" + d.getDate()).slice(-2) + "/" +
-                      ("0" + (d.getMonth() + 1)).slice(-2) + "/" +
-                      d.getFullYear();
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        if (dataLinha === diaAtual) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            sheetHistorico.deleteRow(i);
-            removidos++;
-          }
-        }
-      }
+      removidos = removerRegistrosAutomaticosDoDia(sheetHistorico, diaAtual);
       Logger.log("✅ Removidos " + removidos + " registros automáticos de hoje");
     }
 
@@ -2799,28 +2888,7 @@ function salvarEntradaNoHistorico(dados, data) {
 
     // Remove registros automáticos antigos que serão atualizados
     if (lastRow > 1) {
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheet.getRange(i, 1, 1, 6).getValues()[0];
-
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          var dia = ("0" + d.getDate()).slice(-2);
-          var mes = ("0" + (d.getMonth() + 1)).slice(-2);
-          var ano = d.getFullYear();
-          dataLinha = dia + "/" + mes + "/" + ano;
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        if (dataLinha === data) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            Logger.log("🗑️ Removendo registro automático antigo de entrada linha " + i);
-            sheet.deleteRow(i);
-          }
-        }
-      }
+      removerRegistrosAutomaticosDoDia(sheet, data);
     }
 
     // Adiciona as novas linhas
@@ -3460,13 +3528,13 @@ function buscarEmailsDestinatarios() {
  * - Entradas: do dia ANTERIOR (da aba RelatoriosDiarios)
  * - Faturamento: do dia ANTERIOR (da aba HistoricoFaturamento)
  */
-function buscarDadosAtuais() {
+function buscarDadosAtuais(dataReferencia) {
   try {
     Logger.log("📊 Buscando dados para email...");
 
     var ontem = new Date();
     ontem.setDate(ontem.getDate() - 1);
-    var dataOntem = Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
+    var dataOntem = dataReferencia || Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
 
     Logger.log("📅 Buscando dados de ontem: " + dataOntem);
 
@@ -3988,37 +4056,204 @@ function enviarRelatorioEmail() {
       return;
     }
 
-    // 3. Calcula totais da aba HistoricoFaturamento
-    var totalSemana = calcularTotalSemanaHistorico();
-    var totalMes = calcularTotalMesHistorico();
-
-    // 4. Formata email
-    var htmlBody = formatarEmailRelatorio(dadosAtuais, totalSemana, totalMes);
-
-    // 5. Busca emails destinatários
-    var emails = buscarEmailsDestinatarios();
-
-    if (emails.length === 0) {
-      Logger.log("⚠️ Nenhum email destinatário encontrado");
+    // 3. Faturamento acima do limite: retém o envio e pede conferência aos revisores
+    var totalFaturado = somarValores(dadosAtuais.faturamento);
+    if (totalFaturado > LIMITE_FATURAMENTO_ALERTA) {
+      reterEnvioParaConferencia(dadosAtuais.data, totalFaturado);
       return;
     }
 
-    // 6. Envia email
-    var assunto = "Pedidos e Faturamento atualizado CEARÁ";
-
-    emails.forEach(function(email) {
-      MailApp.sendEmail({
-        to: email,
-        subject: assunto,
-        htmlBody: htmlBody
-      });
-      Logger.log("✅ Email enviado para: " + email);
-    });
-
-    Logger.log("🎉 Relatório enviado com sucesso para " + emails.length + " destinatários!");
+    enviarRelatorioATodos(dadosAtuais);
 
   } catch (erro) {
     Logger.log("❌ Erro ao enviar relatório: " + erro.toString());
+  }
+}
+
+/**
+ * Monta e envia o relatório para todos os emails da coluna A da aba "email"
+ * @returns {number} Quantidade de destinatários atendidos
+ */
+function enviarRelatorioATodos(dadosAtuais) {
+  var totalSemana = calcularTotalSemanaHistorico();
+  var totalMes = calcularTotalMesHistorico();
+  var htmlBody = formatarEmailRelatorio(dadosAtuais, totalSemana, totalMes);
+
+  var emails = buscarEmailsDestinatarios();
+
+  if (emails.length === 0) {
+    Logger.log("⚠️ Nenhum email destinatário encontrado");
+    return 0;
+  }
+
+  var assunto = "Pedidos e Faturamento atualizado CEARÁ";
+
+  emails.forEach(function(email) {
+    MailApp.sendEmail({
+      to: email,
+      subject: assunto,
+      htmlBody: htmlBody
+    });
+    Logger.log("✅ Email enviado para: " + email);
+  });
+
+  Logger.log("🎉 Relatório enviado com sucesso para " + emails.length + " destinatários!");
+  return emails.length;
+}
+
+// ========================================
+// CONFERÊNCIA DE FATURAMENTO ACIMA DO LIMITE
+// ========================================
+
+var LIMITE_FATURAMENTO_ALERTA = 100000;
+var PROP_ENVIO_PENDENTE = 'ENVIO_PENDENTE';
+
+function somarValores(lista) {
+  return (lista || []).reduce(function(soma, item) {
+    return soma + (item.valor || 0);
+  }, 0);
+}
+
+/**
+ * Lê a aba "email": A = email, B = "x" marca o revisor, C = usuário de login do revisor
+ */
+function lerDestinatarios() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("email");
+  if (!sheet || sheet.getLastRow() < 2) return [];
+
+  var colunas = Math.min(3, sheet.getMaxColumns());
+  var dados = sheet.getRange(2, 1, sheet.getLastRow() - 1, colunas).getValues();
+  var lista = [];
+
+  dados.forEach(function(row) {
+    var email = row[0] ? row[0].toString().trim() : "";
+    if (!email) return;
+    lista.push({
+      email: email,
+      revisor: !!row[1] && row[1].toString().trim().toLowerCase() === "x",
+      usuario: row[2] ? row[2].toString().trim().toUpperCase() : ""
+    });
+  });
+
+  return lista;
+}
+
+function usuarioEhRevisor(usuario) {
+  var u = usuario ? usuario.toString().trim().toUpperCase() : "";
+  if (!u) return false;
+  return lerDestinatarios().some(function(r) {
+    return r.revisor && r.usuario === u;
+  });
+}
+
+/**
+ * Guarda o envio como pendente e avisa só os revisores (coluna B = "x").
+ * Sem nenhum revisor cadastrado, nenhum email é enviado.
+ */
+function reterEnvioParaConferencia(data, valor) {
+  PropertiesService.getScriptProperties().setProperty(PROP_ENVIO_PENDENTE, JSON.stringify({
+    data: data,
+    valor: valor,
+    geradoEm: new Date().getTime()
+  }));
+
+  var revisores = lerDestinatarios().filter(function(r) { return r.revisor; });
+
+  if (revisores.length === 0) {
+    Logger.log("⚠️ Faturamento acima do limite e nenhum revisor (x na coluna B da aba 'email'). Nenhum email enviado.");
+    return;
+  }
+
+  var link = "";
+  try { link = ScriptApp.getService().getUrl() || ""; } catch (e) {}
+
+  var html = '<html><body style="font-family: Arial, sans-serif; color: #333;">';
+  html += '<p style="font-size: 16px;"><strong>Atenção: verificar faturamento</strong></p>';
+  html += '<p style="font-size: 14px;">O faturamento de <strong>' + data + '</strong> ultrapassou ' + formatarValor(LIMITE_FATURAMENTO_ALERTA) + '.</p>';
+  html += '<p style="font-size: 28px; font-weight: bold; color: #c0392b; margin: 10px 0;">' + formatarValor(valor) + '</p>';
+  html += '<p style="font-size: 14px;">Verificar faturamento. Se estiver ok, entre no faturamento online e confirme o envio.</p>';
+  html += '<p style="font-size: 13px; color: #777;">O relatório ainda <strong>não foi enviado</strong> aos demais destinatários.</p>';
+  if (link) {
+    html += '<p><a href="' + link + '" style="display:inline-block;padding:10px 20px;background:#1976d2;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Abrir faturamento online</a></p>';
+  }
+  html += '</body></html>';
+
+  revisores.forEach(function(r) {
+    MailApp.sendEmail({
+      to: r.email,
+      subject: "VERIFICAR FATURAMENTO " + data + " - " + formatarValor(valor),
+      htmlBody: html
+    });
+    Logger.log("✅ Aviso de conferência enviado para: " + r.email);
+  });
+}
+
+/**
+ * Chamada pelo painel: informa se há envio pendente (só para revisores)
+ */
+function getEnvioPendente(usuario) {
+  try {
+    var bruto = PropertiesService.getScriptProperties().getProperty(PROP_ENVIO_PENDENTE);
+    if (!bruto || !usuarioEhRevisor(usuario)) return { pendente: false };
+
+    var pend = JSON.parse(bruto);
+    return {
+      pendente: true,
+      data: pend.data,
+      valor: somarValores(buscarFaturamentoDeOntem(pend.data))
+    };
+  } catch (erro) {
+    Logger.log("❌ Erro em getEnvioPendente: " + erro.toString());
+    return { pendente: false };
+  }
+}
+
+/**
+ * Chamada pelo botão "Enviar faturamento": dispara o relatório a todos
+ */
+function confirmarEnvioFaturamento(usuario) {
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    return { sucesso: false, mensagem: "Sistema ocupado. Tente novamente em instantes." };
+  }
+
+  try {
+    if (!usuarioEhRevisor(usuario)) {
+      return { sucesso: false, mensagem: "Usuário sem permissão para confirmar o envio." };
+    }
+
+    var props = PropertiesService.getScriptProperties();
+    var bruto = props.getProperty(PROP_ENVIO_PENDENTE);
+    if (!bruto) {
+      return { sucesso: false, mensagem: "Nenhum envio pendente (o relatório já foi enviado)." };
+    }
+
+    var pend = JSON.parse(bruto);
+    props.deleteProperty(PROP_ENVIO_PENDENTE);
+
+    try {
+      var dados = buscarDadosAtuais(pend.data);
+      if (dados.pedidos.length === 0 && dados.entradas.length === 0 && dados.faturamento.length === 0) {
+        throw new Error("Nenhum dado encontrado para " + pend.data + ".");
+      }
+
+      var qtd = enviarRelatorioATodos(dados);
+      if (qtd === 0) throw new Error("Nenhum destinatário na aba 'email'.");
+
+      Logger.log("✅ Envio confirmado por " + usuario + " (" + pend.data + ")");
+      return { sucesso: true, mensagem: "Relatório enviado para " + qtd + " destinatários." };
+    } catch (erro) {
+      props.setProperty(PROP_ENVIO_PENDENTE, bruto);
+      throw erro;
+    }
+
+  } catch (erro) {
+    Logger.log("❌ Erro em confirmarEnvioFaturamento: " + erro.toString());
+    return { sucesso: false, mensagem: "Erro ao enviar: " + erro.message };
+  } finally {
+    lock.releaseLock();
   }
 }
 
