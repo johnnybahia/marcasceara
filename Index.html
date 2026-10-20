@@ -38,6 +38,21 @@
       align-items: center;
       gap: 15px;
     }
+    .btn-enviar-faturamento {
+      background: linear-gradient(135deg, #e67e22, #c0392b);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.3s ease;
+    }
+    .btn-enviar-faturamento:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .user-info {
       text-align: right;
       margin-right: 10px;
@@ -1107,6 +1122,9 @@
       </div>
     </div>
     <div class="header-right">
+      <button class="btn-enviar-faturamento" id="btnEnviarFaturamento" style="display:none;" onclick="enviarFaturamento()">
+        📤 Enviar faturamento
+      </button>
       <div class="user-info">
         <div class="user-label">Usuário</div>
         <div class="user-name" id="nomeUsuario">Carregando...</div>
@@ -1530,6 +1548,7 @@
         // Inicia carregamento dos dados
         console.log("✅ Login bem-sucedido! Carregando dados...");
         addDebugLog("✅ Autenticado como: " + resultado.nome);
+        verificarEnvioPendente();
         carregarDadosPlanilha();
       } else {
         onLoginFailure(resultado.mensagem || "Erro desconhecido");
@@ -1542,6 +1561,49 @@
       msgErro.style.display = "block";
       document.querySelector("#login-container button").disabled = false;
       document.querySelector("#login-container button").innerHTML = "Entrar";
+    }
+
+    // Envio do relatório retido por faturamento acima do limite (botão só para revisores)
+    var envioPendente = null;
+
+    function formatarBRL(valor) {
+      return Number(valor || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+    }
+
+    function verificarEnvioPendente() {
+      google.script.run
+        .withSuccessHandler(function(r) {
+          var btn = document.getElementById("btnEnviarFaturamento");
+          envioPendente = r && r.pendente ? r : null;
+          btn.style.display = envioPendente ? "inline-block" : "none";
+          btn.disabled = false;
+        })
+        .withFailureHandler(function(erro) {
+          addDebugLog("Erro ao verificar envio pendente: " + erro.message, "error");
+        })
+        .getEnvioPendente(usuarioLogado.nome);
+    }
+
+    function enviarFaturamento() {
+      if (!envioPendente) return;
+
+      var msg = "Faturamento de " + envioPendente.data + ": " + formatarBRL(envioPendente.valor) +
+                "\n\nConfirmar o envio do relatório a todos os destinatários?";
+      if (!confirm(msg)) return;
+
+      var btn = document.getElementById("btnEnviarFaturamento");
+      btn.disabled = true;
+
+      google.script.run
+        .withSuccessHandler(function(r) {
+          alert(r.mensagem);
+          verificarEnvioPendente();
+        })
+        .withFailureHandler(function(erro) {
+          alert("Erro ao enviar: " + erro.message);
+          btn.disabled = false;
+        })
+        .confirmarEnvioFaturamento(usuarioLogado.nome);
     }
 
     // Faz logout
