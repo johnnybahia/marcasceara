@@ -422,12 +422,83 @@ function formatarValor(valor) {
 // SISTEMA DE FATURAMENTO
 // ========================================
 
+// ========================================
+// CACHE POR EXECUÇÃO + LOCK (evita estouro do limite de 6 min)
+// ========================================
+
+// Ligado só dentro de getFaturamentoDia: Dados1 e o mapa OC->Marca são lidos uma vez por execução.
+// Resultado vazio nunca é guardado, para o retry de agruparDados1PorOC continuar funcionando.
+var _cacheExecucao = null;
+
+function iniciarCacheExecucao() {
+  _cacheExecucao = {};
+}
+
+function encerrarCacheExecucao() {
+  _cacheExecucao = null;
+}
+
+/**
+ * Lock de verificação. Usa o lock do documento (o doPost do robô usa o do script,
+ * então os dois não se bloqueiam). Retorna null se já houver outra rodando.
+ */
+function adquirirLockVerificacao() {
+  var lock = LockService.getDocumentLock() || LockService.getScriptLock();
+  return lock.tryLock(10000) ? lock : null;
+}
+
+/**
+ * Remove de uma aba de histórico (A=Data ... E=Observação) as linhas automáticas
+ * (sem observação) de uma data. Lê a aba uma vez e apaga em blocos contíguos.
+ * @returns {number} Quantidade de linhas removidas
+ */
+function removerRegistrosAutomaticosDoDia(sheet, data) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+
+  var dados = sheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  var linhas = [];
+
+  dados.forEach(function(row, index) {
+    var dataLinha = row[0];
+    if (dataLinha instanceof Date) {
+      var d = dataLinha;
+      dataLinha = ("0" + d.getDate()).slice(-2) + "/" +
+                  ("0" + (d.getMonth() + 1)).slice(-2) + "/" +
+                  d.getFullYear();
+    } else {
+      dataLinha = dataLinha.toString().trim();
+    }
+
+    if (dataLinha === data) {
+      var obs = row[4] ? row[4].toString().trim() : "";
+      if (obs === "") linhas.push(index + 2);
+    }
+  });
+
+  // De baixo para cima, agrupando linhas vizinhas numa única chamada
+  var fim = linhas.length - 1;
+  while (fim >= 0) {
+    var ini = fim;
+    while (ini > 0 && linhas[ini - 1] === linhas[ini] - 1) ini--;
+    sheet.deleteRows(linhas[ini], fim - ini + 1);
+    fim = ini - 1;
+  }
+
+  if (linhas.length > 0) {
+    Logger.log("🗑️ Removidos " + linhas.length + " registros automáticos de " + data);
+  }
+  return linhas.length;
+}
+
 /**
  * Lê dados da aba "Dados1" (ordem de compra, valor, cliente)
  * @returns {Array} Array de objetos com os dados
  */
 function lerDados1() {
   try {
+    if (_cacheExecucao && _cacheExecucao.dados1) return _cacheExecucao.dados1;
+
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados1");
     if (!sheet) {
       Logger.log("⚠️ Aba 'Dados1' não encontrada");
@@ -478,6 +549,7 @@ function lerDados1() {
     });
 
     Logger.log("✅ Lidos " + resultado.length + " registros da aba Dados1");
+    if (_cacheExecucao && resultado.length > 0) _cacheExecucao.dados1 = resultado;
     return resultado;
   } catch (erro) {
     Logger.log("❌ Erro ao ler Dados1: " + erro.toString());
@@ -560,6 +632,8 @@ function agruparDados1PorOC() {
  */
 function criarMapaOCMarca() {
   try {
+    if (_cacheExecucao && _cacheExecucao.mapaOCMarca) return _cacheExecucao.mapaOCMarca;
+
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Dados");
     if (!sheet) {
       Logger.log("⚠️ Aba 'Dados' não encontrada");
@@ -595,6 +669,7 @@ function criarMapaOCMarca() {
     });
 
     Logger.log("✅ Mapa criado com " + Object.keys(mapa).length + " OCs únicas de " + numLinhas + " linhas");
+    if (_cacheExecucao && contador > 0) _cacheExecucao.mapaOCMarca = mapa;
     return mapa;
 
   } catch (erro) {
@@ -762,9 +837,10 @@ function sincronizarOCsNaAbaControle(sheet) {
     // Lê o que já está na aba
     var lastRow = sheet.getLastRow();
     var dadosExistentes = {};
+    var dados = [];
 
     if (lastRow > 1) {
-      var dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+      dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
       dados.forEach(function(row, index) {
         var oc = row[0].toString().trim();
         dadosExistentes[oc] = {
@@ -785,17 +861,18 @@ function sincronizarOCsNaAbaControle(sheet) {
       var valorTotal = item.valor;
 
       if (dadosExistentes[oc]) {
-        // OC já existe - atualiza apenas valor total e saldo
+        // OC já existe - atualiza apenas valor total e saldo (em memória; gravado em bloco abaixo)
         var linha = dadosExistentes[oc].linha;
         var valorFaturado = dadosExistentes[oc].valorFaturado;
         var saldoRestante = valorTotal - valorFaturado;
         var percFaturado = valorTotal > 0 ? (valorFaturado / valorTotal * 100).toFixed(1) + "%" : "0%";
         var status = saldoRestante <= 0 ? "Faturado" : (valorFaturado > 0 ? "Parcial" : "Pendente");
 
-        sheet.getRange(linha, 4).setValue(valorTotal);  // Valor Total
-        sheet.getRange(linha, 6).setValue(saldoRestante);  // Saldo Restante
-        sheet.getRange(linha, 7).setValue(percFaturado);  // %
-        sheet.getRange(linha, 9).setValue(status);  // Status
+        var rowMem = dados[linha - 2];
+        rowMem[3] = valorTotal;      // Valor Total
+        rowMem[5] = saldoRestante;   // Saldo Restante
+        rowMem[6] = percFaturado;    // %
+        rowMem[8] = status;          // Status
 
         linhasAtualizadas++;
 
@@ -814,6 +891,15 @@ function sincronizarOCsNaAbaControle(sheet) {
         ]);
       }
     });
+
+    // Grava só as colunas calculadas (D, F:G, I), uma chamada por bloco.
+    // E (Valor Faturado) e H (Última Detecção) não são tocadas.
+    if (linhasAtualizadas > 0) {
+      var total = dados.length;
+      sheet.getRange(2, 4, total, 1).setValues(dados.map(function(r) { return [r[3]]; }));
+      sheet.getRange(2, 6, total, 2).setValues(dados.map(function(r) { return [r[5], r[6]]; }));
+      sheet.getRange(2, 9, total, 1).setValues(dados.map(function(r) { return [r[8]]; }));
+    }
 
     // Adiciona novas linhas
     if (novasLinhas.length > 0) {
@@ -917,22 +1003,30 @@ function aplicarFormatacaoCondicionalControle(sheet) {
     var lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
 
-    var dados = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+    // Coluna I (Status): lê status e cores atuais e regrava tudo em uma chamada por propriedade.
+    // Status desconhecido mantém a cor que já tinha.
+    var rangeStatus = sheet.getRange(2, 9, lastRow - 1, 1);
+    var status = rangeStatus.getValues();
+    var fundos = rangeStatus.getBackgrounds();
+    var fontes = rangeStatus.getFontColors();
 
-    dados.forEach(function(row, index) {
-      var linha = index + 2;
-      var status = row[8].toString();
-      var rangeStatus = sheet.getRange(linha, 9);
+    status.forEach(function(row, index) {
+      var s = row[0].toString();
 
-      // Cores por status
-      if (status === "Faturado") {
-        rangeStatus.setBackground("#4CAF50").setFontColor("#FFFFFF");
-      } else if (status === "Parcial") {
-        rangeStatus.setBackground("#FF9800").setFontColor("#FFFFFF");
-      } else if (status === "Pendente") {
-        rangeStatus.setBackground("#F5F5F5").setFontColor("#000000");
+      if (s === "Faturado") {
+        fundos[index][0] = "#4CAF50";
+        fontes[index][0] = "#FFFFFF";
+      } else if (s === "Parcial") {
+        fundos[index][0] = "#FF9800";
+        fontes[index][0] = "#FFFFFF";
+      } else if (s === "Pendente") {
+        fundos[index][0] = "#F5F5F5";
+        fontes[index][0] = "#000000";
       }
     });
+
+    rangeStatus.setBackgrounds(fundos);
+    rangeStatus.setFontColors(fontes);
 
   } catch (erro) {
     Logger.log("❌ Erro ao aplicar formatação: " + erro.toString());
@@ -1191,6 +1285,15 @@ function getEntradasDoDia() {
  * IMPORTANTE: Só atualiza snapshot quando chamado via trigger (não na webapp)
  */
 function getFaturamentoDia() {
+  iniciarCacheExecucao();
+  try {
+    return calcularFaturamentoDia();
+  } finally {
+    encerrarCacheExecucao();
+  }
+}
+
+function calcularFaturamentoDia() {
   try {
     Logger.log("💰 Iniciando getFaturamentoDia...");
 
@@ -1766,30 +1869,7 @@ function salvarFaturamentoNoHistorico(dados, data) {
 
     // Remove registros automáticos antigos que serão atualizados
     if (lastRow > 1) {
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheet.getRange(i, 1, 1, 6).getValues()[0];
-
-        // Normaliza data
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          var dia = ("0" + d.getDate()).slice(-2);
-          var mes = ("0" + (d.getMonth() + 1)).slice(-2);
-          var ano = d.getFullYear();
-          dataLinha = dia + "/" + mes + "/" + ano;
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        // Se é o mesmo dia e NÃO tem observação (automático)
-        if (dataLinha === data) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            Logger.log("🗑️ Removendo registro automático antigo linha " + i);
-            sheet.deleteRow(i);
-          }
-        }
-      }
+      removerRegistrosAutomaticosDoDia(sheet, data);
     }
 
     // Adiciona as novas linhas
@@ -1950,6 +2030,20 @@ function resetarAcumuladoFaturamento() {
  * USE ESTA FUNÇÃO PARA EXECUTAR MANUALMENTE
  */
 function executarVerificacaoFaturamento() {
+  var lock = adquirirLockVerificacao();
+  if (!lock) {
+    Logger.log("⏭️ Já existe uma verificação de faturamento em andamento. Esta execução foi ignorada.");
+    return { sucesso: false, dados: [], erro: "Verificação já em andamento." };
+  }
+
+  try {
+    return verificarFaturamentoComLog();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function verificarFaturamentoComLog() {
   Logger.log("🔄 Executando verificação manual de faturamento...");
 
   var resultado = getFaturamentoDia();
@@ -2123,6 +2217,20 @@ function setupTodosOsTriggers() {
  * USE QUANDO: Os cálculos ficaram errados ou tudo foi marcado como "Faturado" indevidamente
  */
 function corrigirFaturamento() {
+  var lock = adquirirLockVerificacao();
+  if (!lock) {
+    Logger.log("⏭️ Há uma verificação de faturamento em andamento. Tente novamente em instantes.");
+    return { sucesso: false, mensagem: "Há uma verificação de faturamento em andamento. Tente novamente em instantes." };
+  }
+
+  try {
+    return executarCorrecaoFaturamento();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function executarCorrecaoFaturamento() {
   try {
     Logger.log("🔧 === INICIANDO CORREÇÃO DE FATURAMENTO ===");
 
@@ -2165,26 +2273,7 @@ function corrigirFaturamento() {
       var lastRow = sheetHistorico.getLastRow();
       var removidos = 0;
 
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheetHistorico.getRange(i, 1, 1, 6).getValues()[0];
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          dataLinha = ("0" + d.getDate()).slice(-2) + "/" +
-                      ("0" + (d.getMonth() + 1)).slice(-2) + "/" +
-                      d.getFullYear();
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        if (dataLinha === diaAtual) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            sheetHistorico.deleteRow(i);
-            removidos++;
-          }
-        }
-      }
+      removidos = removerRegistrosAutomaticosDoDia(sheetHistorico, diaAtual);
       Logger.log("✅ Removidos " + removidos + " registros automáticos de hoje");
     }
 
@@ -2799,28 +2888,7 @@ function salvarEntradaNoHistorico(dados, data) {
 
     // Remove registros automáticos antigos que serão atualizados
     if (lastRow > 1) {
-      for (var i = lastRow; i >= 2; i--) {
-        var row = sheet.getRange(i, 1, 1, 6).getValues()[0];
-
-        var dataLinha = row[0];
-        if (dataLinha instanceof Date) {
-          var d = dataLinha;
-          var dia = ("0" + d.getDate()).slice(-2);
-          var mes = ("0" + (d.getMonth() + 1)).slice(-2);
-          var ano = d.getFullYear();
-          dataLinha = dia + "/" + mes + "/" + ano;
-        } else {
-          dataLinha = dataLinha.toString().trim();
-        }
-
-        if (dataLinha === data) {
-          var obs = row[4] ? row[4].toString().trim() : "";
-          if (!obs || obs === "") {
-            Logger.log("🗑️ Removendo registro automático antigo de entrada linha " + i);
-            sheet.deleteRow(i);
-          }
-        }
-      }
+      removerRegistrosAutomaticosDoDia(sheet, data);
     }
 
     // Adiciona as novas linhas
