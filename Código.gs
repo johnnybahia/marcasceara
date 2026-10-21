@@ -3423,22 +3423,26 @@ function limparDadosDuplicados() {
  * Salva dados diários na aba RelatoriosDiarios
  * Chamada pelo trigger diário às 8h
  */
+var JANELA_CHECAGEM_DUPLICIDADE = 300;
+
 function salvarDadosDiarios() {
   try {
     Logger.log("📊 Iniciando salvamento de dados diários...");
 
     var sheet = criarOuVerificarAbaRelatoriosDiarios();
-    var hoje = new Date();
-    var dataFormatada = Utilities.formatDate(hoje, Session.getScriptTimeZone(), "dd/MM/yyyy");
+    var tz = Session.getScriptTimeZone();
+    var dataFormatada = Utilities.formatDate(new Date(), tz, "dd/MM/yyyy");
 
-    // Verifica se já existem dados para hoje (evita duplicação)
+    // Verifica se já existem dados para hoje (evita duplicação).
+    // Os dados entram em ordem cronológica: basta olhar o final da aba.
     var lastRow = sheet.getLastRow();
     if (lastRow > 1) {
-      var dadosExistentes = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-      var jaTemDadosHoje = dadosExistentes.some(function(row) {
+      var janela = Math.min(lastRow - 1, JANELA_CHECAGEM_DUPLICIDADE);
+      var recentes = sheet.getRange(lastRow - janela + 1, 1, janela, 1).getValues();
+      var jaTemDadosHoje = recentes.some(function(row) {
         var dataRow = row[0];
         if (dataRow instanceof Date) {
-          return Utilities.formatDate(dataRow, Session.getScriptTimeZone(), "dd/MM/yyyy") === dataFormatada;
+          return Utilities.formatDate(dataRow, tz, "dd/MM/yyyy") === dataFormatada;
         }
         return String(dataRow).trim() === dataFormatada;
       });
@@ -3450,34 +3454,30 @@ function salvarDadosDiarios() {
       }
     }
 
-    // 1. Pedidos a Faturar
-    var pedidos = getPedidosAFaturar();
-    if (pedidos.sucesso && pedidos.dados) {
-      pedidos.dados.forEach(function(item) {
-        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Pedido a Faturar"]);
-      });
-      Logger.log("✅ " + pedidos.dados.length + " pedidos salvos");
+    var linhas = [];
+    var adicionar = function(resultado, tipo, rotulo) {
+      if (resultado.sucesso && resultado.dados) {
+        resultado.dados.forEach(function(item) {
+          linhas.push([dataFormatada, item.cliente, item.marca, item.valor, tipo]);
+        });
+        Logger.log("✅ " + resultado.dados.length + " " + rotulo);
+      }
+    };
+
+    adicionar(getPedidosAFaturar(), "Pedido a Faturar", "pedidos lidos");
+    adicionar(getEntradasDoDia(), "Entrada do Dia", "entradas lidas");
+    adicionar(getUltimoFaturamento(), "Faturamento", "faturamentos lidos");
+
+    if (linhas.length === 0) {
+      Logger.log("⚠️ Nenhum dado para salvar em " + dataFormatada);
+      return false;
     }
 
-    // 2. Entradas do Dia
-    var entradas = getEntradasDoDia();
-    if (entradas.sucesso && entradas.dados) {
-      entradas.dados.forEach(function(item) {
-        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Entrada do Dia"]);
-      });
-      Logger.log("✅ " + entradas.dados.length + " entradas salvas");
-    }
+    // Uma única gravação em lote (appendRow em loop estoura o tempo limite)
+    sheet.getRange(sheet.getLastRow() + 1, 1, linhas.length, 5).setValues(linhas);
+    SpreadsheetApp.flush();
 
-    // 3. Faturamento do Dia
-    var faturamento = getUltimoFaturamento();
-    if (faturamento.sucesso && faturamento.dados) {
-      faturamento.dados.forEach(function(item) {
-        sheet.appendRow([dataFormatada, item.cliente, item.marca, item.valor, "Faturamento"]);
-      });
-      Logger.log("✅ " + faturamento.dados.length + " faturamentos salvos");
-    }
-
-    Logger.log("✅ Dados diários salvos com sucesso!");
+    Logger.log("✅ Dados diários salvos com sucesso! " + linhas.length + " linhas gravadas.");
     return true;
 
   } catch (erro) {
