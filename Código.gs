@@ -1,5 +1,9 @@
 // --- ARQUIVO: Código.gs ---
 
+// Versão do programa (fonte única) — ver CLAUDE.md
+var VERSAO = '1.0.0';
+var VERSAO_DATA = '10/11/2026';
+
 // ========================================
 // SISTEMA DE AUTENTICAÇÃO
 // ========================================
@@ -162,7 +166,10 @@ function doGet(e) {
   Logger.log("📄 doGet chamado - Servindo Index.html (SPA)");
 
   // Serve sempre o Index.html - a autenticação acontece no frontend
-  return HtmlService.createHtmlOutputFromFile('Index')
+  var template = HtmlService.createTemplateFromFile('Index');
+  template.versao = VERSAO;
+  template.versaoData = VERSAO_DATA;
+  return template.evaluate()
       .setTitle('Pedidos por Marca - Marfim Ceará')
       .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
       .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -4141,8 +4148,14 @@ function lerDestinatarios() {
 function usuarioEhRevisor(usuario) {
   var u = usuario ? usuario.toString().trim().toUpperCase() : "";
   if (!u) return false;
-  return lerDestinatarios().some(function(r) {
-    return r.revisor && r.usuario === u;
+
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("senha");
+  if (!sheet || sheet.getLastRow() < 2 || sheet.getMaxColumns() < 3) return false;
+
+  // Aba "senha": A = usuário, B = senha, C = "x" libera o botão Enviar faturamento
+  return sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues().some(function(row) {
+    return row[0].toString().trim().toUpperCase() === u &&
+           row[2].toString().trim().toLowerCase() === "x";
   });
 }
 
@@ -4164,17 +4177,16 @@ function reterEnvioParaConferencia(data, valor) {
     return;
   }
 
-  var link = "";
-  try { link = ScriptApp.getService().getUrl() || ""; } catch (e) {}
+  var link = obterUrlSistema();
 
   var html = '<html><body style="font-family: Arial, sans-serif; color: #333;">';
   html += '<p style="font-size: 16px;"><strong>Atenção: verificar faturamento</strong></p>';
   html += '<p style="font-size: 14px;">O faturamento de <strong>' + data + '</strong> ultrapassou ' + formatarValor(LIMITE_FATURAMENTO_ALERTA) + '.</p>';
   html += '<p style="font-size: 28px; font-weight: bold; color: #c0392b; margin: 10px 0;">' + formatarValor(valor) + '</p>';
-  html += '<p style="font-size: 14px;">Verificar faturamento. Se estiver ok, entre no faturamento online e confirme o envio.</p>';
+  html += '<p style="font-size: 14px;">Verificar faturamento. Se estiver ok, entre no sistema (usuário e senha) e clique em <strong>Enviar faturamento</strong>.</p>';
   html += '<p style="font-size: 13px; color: #777;">O relatório ainda <strong>não foi enviado</strong> aos demais destinatários.</p>';
   if (link) {
-    html += '<p><a href="' + link + '" style="display:inline-block;padding:10px 20px;background:#1976d2;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Abrir faturamento online</a></p>';
+    html += '<p><a href="' + link + '" style="display:inline-block;padding:10px 20px;background:#1976d2;color:#fff;text-decoration:none;border-radius:6px;font-weight:600;">Abrir o sistema</a></p>';
   }
   html += '</body></html>';
 
@@ -4193,19 +4205,43 @@ function reterEnvioParaConferencia(data, valor) {
  */
 function getEnvioPendente(usuario) {
   try {
-    var bruto = PropertiesService.getScriptProperties().getProperty(PROP_ENVIO_PENDENTE);
-    if (!bruto || !usuarioEhRevisor(usuario)) return { pendente: false };
+    if (!usuarioEhRevisor(usuario)) return { revisor: false, pendente: false };
 
-    var pend = JSON.parse(bruto);
+    var bruto = PropertiesService.getScriptProperties().getProperty(PROP_ENVIO_PENDENTE);
+    var data;
+    if (bruto) {
+      data = JSON.parse(bruto).data;
+    } else {
+      data = dataReferenciaEnvio();
+    }
+
     return {
-      pendente: true,
-      data: pend.data,
-      valor: somarValores(buscarFaturamentoDeOntem(pend.data))
+      revisor: true,
+      pendente: !!bruto,
+      data: data,
+      valor: somarValores(buscarFaturamentoDeOntem(data))
     };
   } catch (erro) {
     Logger.log("❌ Erro em getEnvioPendente: " + erro.toString());
-    return { pendente: false };
+    return { revisor: false, pendente: false };
   }
+}
+
+/** Data de referência do relatório (ontem), no mesmo formato de buscarDadosAtuais */
+function dataReferenciaEnvio() {
+  var ontem = new Date();
+  ontem.setDate(ontem.getDate() - 1);
+  return Utilities.formatDate(ontem, Session.getScriptTimeZone(), "dd/MM/yyyy");
+}
+
+/** URL do sistema para o link do e-mail: propriedade URL_APP (fixa) ou a implantação atual */
+function obterUrlSistema() {
+  var url = "";
+  try { url = PropertiesService.getScriptProperties().getProperty('URL_APP') || ""; } catch (e) {}
+  if (!url) {
+    try { url = ScriptApp.getService().getUrl() || ""; } catch (e) {}
+  }
+  return url.replace(/\/dev$/, '/exec');
 }
 
 /**
@@ -4226,12 +4262,8 @@ function confirmarEnvioFaturamento(usuario) {
 
     var props = PropertiesService.getScriptProperties();
     var bruto = props.getProperty(PROP_ENVIO_PENDENTE);
-    if (!bruto) {
-      return { sucesso: false, mensagem: "Nenhum envio pendente (o relatório já foi enviado)." };
-    }
-
-    var pend = JSON.parse(bruto);
-    props.deleteProperty(PROP_ENVIO_PENDENTE);
+    var pend = bruto ? JSON.parse(bruto) : { data: dataReferenciaEnvio() };
+    if (bruto) props.deleteProperty(PROP_ENVIO_PENDENTE);
 
     try {
       var dados = buscarDadosAtuais(pend.data);
@@ -4245,7 +4277,7 @@ function confirmarEnvioFaturamento(usuario) {
       Logger.log("✅ Envio confirmado por " + usuario + " (" + pend.data + ")");
       return { sucesso: true, mensagem: "Relatório enviado para " + qtd + " destinatários." };
     } catch (erro) {
-      props.setProperty(PROP_ENVIO_PENDENTE, bruto);
+      if (bruto) props.setProperty(PROP_ENVIO_PENDENTE, bruto);
       throw erro;
     }
 

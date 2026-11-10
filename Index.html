@@ -53,6 +53,38 @@
       opacity: 0.6;
       cursor: not-allowed;
     }
+    .faixa-versao {
+      background: #2c3e50;
+      color: #ecf0f1;
+      text-align: center;
+      font-size: 12px;
+      padding: 4px 10px;
+    }
+    #modalEnvio {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 10000;
+      align-items: center;
+      justify-content: center;
+    }
+    #modalEnvio .caixa {
+      background: #fff;
+      border-radius: 10px;
+      padding: 24px;
+      max-width: 420px;
+      width: 90%;
+      text-align: center;
+    }
+    #modalEnvio .valor { font-size: 26px; font-weight: bold; color: #c0392b; margin: 8px 0 14px; }
+    #modalEnvio button {
+      border: none; border-radius: 6px; padding: 10px 28px; margin: 0 6px;
+      font-size: 15px; font-weight: 600; cursor: pointer; color: #fff;
+    }
+    #modalEnvio .sim { background: #27ae60; }
+    #modalEnvio .nao { background: #7f8c8d; }
+    #modalEnvio button:disabled { opacity: 0.6; cursor: not-allowed; }
     .user-info {
       text-align: right;
       margin-right: 10px;
@@ -215,7 +247,7 @@
     @media print {
       body { background-color: white; margin: 0; padding: 20px; }
       .header { border-bottom: 2px solid #000; }
-      .btn-print, .filters-box, .debug-console, #loading { display: none !important; }
+      .btn-print, .filters-box, .debug-console, #loading, .faixa-versao, #modalEnvio { display: none !important; }
       .container { max-width: 100%; margin: 0; padding: 0; }
       .kpi-row { page-break-inside: avoid; }
       .kpi-card { box-shadow: none; border: 1px solid #ddd; }
@@ -1098,6 +1130,20 @@
 </head>
 <body>
 
+  <div class="faixa-versao">Versão <?= versao ?> · atualizado em <?= versaoData ?></div>
+
+  <div id="modalEnvio">
+    <div class="caixa">
+      <div id="modalEnvioTexto"></div>
+      <div class="valor" id="modalEnvioValor"></div>
+      <div>Enviar o relatório de faturamento por e-mail a todos os destinatários?</div>
+      <div style="margin-top:18px;">
+        <button class="sim" id="modalEnvioSim" onclick="confirmarEnvio()">Sim</button>
+        <button class="nao" id="modalEnvioNao" onclick="fecharModalEnvio()">Não</button>
+      </div>
+    </div>
+  </div>
+
   <!-- TELA DE LOGIN -->
   <div id="login-container">
     <img src="https://i.ibb.co/FGGjdsM/LOGO-MARFIM.jpg" alt="Logo MARFIM" class="login-logo">
@@ -1574,7 +1620,7 @@
       google.script.run
         .withSuccessHandler(function(r) {
           var btn = document.getElementById("btnEnviarFaturamento");
-          envioPendente = r && r.pendente ? r : null;
+          envioPendente = r && r.revisor ? r : null;
           btn.style.display = envioPendente ? "inline-block" : "none";
           btn.disabled = false;
         })
@@ -1587,21 +1633,36 @@
     function enviarFaturamento() {
       if (!envioPendente) return;
 
-      var msg = "Faturamento de " + envioPendente.data + ": " + formatarBRL(envioPendente.valor) +
-                "\n\nConfirmar o envio do relatório a todos os destinatários?";
-      if (!confirm(msg)) return;
+      document.getElementById("modalEnvioTexto").textContent =
+        "Faturamento de " + envioPendente.data + (envioPendente.pendente ? " (acima do limite)" : "");
+      document.getElementById("modalEnvioValor").textContent = formatarBRL(envioPendente.valor);
+      document.getElementById("modalEnvioSim").disabled = false;
+      document.getElementById("modalEnvioNao").disabled = false;
+      document.getElementById("modalEnvio").style.display = "flex";
+    }
 
-      var btn = document.getElementById("btnEnviarFaturamento");
-      btn.disabled = true;
+    function fecharModalEnvio() {
+      document.getElementById("modalEnvio").style.display = "none";
+    }
+
+    function confirmarEnvio() {
+      var sim = document.getElementById("modalEnvioSim");
+      var nao = document.getElementById("modalEnvioNao");
+      sim.disabled = true;
+      nao.disabled = true;
+      sim.textContent = "Enviando...";
 
       google.script.run
         .withSuccessHandler(function(r) {
+          sim.textContent = "Sim";
+          fecharModalEnvio();
           alert(r.mensagem);
           verificarEnvioPendente();
         })
         .withFailureHandler(function(erro) {
+          sim.textContent = "Sim";
+          fecharModalEnvio();
           alert("Erro ao enviar: " + erro.message);
-          btn.disabled = false;
         })
         .confirmarEnvioFaturamento(usuarioLogado.nome);
     }
