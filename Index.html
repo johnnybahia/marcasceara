@@ -759,6 +759,24 @@
       transform: translateY(-1px);
     }
 
+    .btn-inserir-historico {
+      padding: 6px 12px;
+      margin: 0 3px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      background-color: #4CAF50;
+      color: white;
+      transition: all 0.2s;
+    }
+
+    .btn-inserir-historico:hover {
+      background-color: #388E3C;
+      transform: translateY(-1px);
+    }
+
     /* COLUNA DE OBSERVAÇÃO */
     .observacao-cell {
       font-style: italic;
@@ -1437,6 +1455,42 @@
       </div>
 
       <button class="btn-salvar-edicao" onclick="salvarEdicao()">💾 Salvar Alterações</button>
+    </div>
+  </div>
+
+  <!-- MODAL: INSERIR VALOR NO FATURAMENTO DO DIA -->
+  <div id="modalInserir" class="modal-editar">
+    <div class="modal-editar-content">
+      <div class="modal-editar-header">
+        <h3>➕ Inserir no Faturamento</h3>
+        <span class="close-editar" onclick="fecharModalInserir()">&times;</span>
+      </div>
+
+      <div class="form-group-editar">
+        <label>Data:</label>
+        <input type="text" id="insData" readonly style="background-color: #f5f5f5;">
+      </div>
+
+      <div class="form-group-editar">
+        <label>Cliente:</label>
+        <select id="insCliente" onchange="preencherMarcasInserir()" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;">
+          <option value="">Carregando...</option>
+        </select>
+      </div>
+
+      <div class="form-group-editar">
+        <label>Marca:</label>
+        <select id="insMarca" disabled style="width:100%;padding:10px;border:1px solid #ddd;border-radius:6px;font-size:14px;">
+          <option value="">Selecione o cliente</option>
+        </select>
+      </div>
+
+      <div class="form-group-editar">
+        <label>Valor a acrescentar (R$):</label>
+        <input type="text" id="insValor" inputmode="decimal" placeholder="0,00">
+      </div>
+
+      <button class="btn-salvar-edicao" id="btnSalvarInserir" onclick="salvarInserir()">➕ Inserir Valor</button>
     </div>
   </div>
 
@@ -2694,7 +2748,8 @@
 
         // Cabeçalho do dia
         html += '<tr class="data-grupo">';
-        html += '<td colspan="6">📅 ' + data + '</td>';
+        html += '<td colspan="5">📅 ' + data + '</td>';
+        html += '<td style="text-align:center;"><button class="btn-inserir-historico" data-data="' + data + '" onclick="abrirModalInserir(this.dataset.data)">➕ Inserir</button></td>';
         html += '</tr>';
 
         // Itens do dia
@@ -2806,6 +2861,124 @@
           alert("❌ Erro ao salvar: " + error.message);
         })
         .editarRegistroFaturamento(data, cliente, marca, novoValor, observacao);
+    }
+
+    // ========================================
+    // INSERIR VALOR FALTANTE NO FATURAMENTO DO DIA
+    // ========================================
+    var clientesMarcasInserir = null;
+
+    function abrirModalInserir(data) {
+      document.getElementById('insData').value = data;
+      document.getElementById('insValor').value = '';
+      document.getElementById('insMarca').innerHTML = '<option value="">Selecione o cliente</option>';
+      document.getElementById('insMarca').disabled = true;
+      document.getElementById('modalInserir').style.display = 'block';
+
+      if (clientesMarcasInserir) {
+        preencherClientesInserir();
+        return;
+      }
+      document.getElementById('insCliente').innerHTML = '<option value="">Carregando...</option>';
+      google.script.run
+        .withSuccessHandler(function(res) {
+          if (!res.sucesso) {
+            alert("❌ " + (res.mensagem || "Erro ao carregar clientes"));
+            return;
+          }
+          clientesMarcasInserir = res.dados;
+          preencherClientesInserir();
+        })
+        .withFailureHandler(function(error) {
+          alert("❌ Erro ao carregar clientes: " + error.message);
+        })
+        .getClientesMarcasFaturamento();
+    }
+
+    function preencherClientesInserir() {
+      var sel = document.getElementById('insCliente');
+      sel.innerHTML = '<option value="">Selecione o cliente</option>';
+      clientesMarcasInserir.forEach(function(item, i) {
+        var opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = item.cliente;
+        sel.appendChild(opt);
+      });
+    }
+
+    function preencherMarcasInserir() {
+      var idx = document.getElementById('insCliente').value;
+      var selMarca = document.getElementById('insMarca');
+      selMarca.innerHTML = '';
+      if (idx === '') {
+        selMarca.innerHTML = '<option value="">Selecione o cliente</option>';
+        selMarca.disabled = true;
+        return;
+      }
+      var marcas = clientesMarcasInserir[parseInt(idx, 10)].marcas;
+      selMarca.innerHTML = '<option value="">Selecione a marca</option>';
+      marcas.forEach(function(m) {
+        var opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        selMarca.appendChild(opt);
+      });
+      selMarca.disabled = false;
+    }
+
+    function fecharModalInserir() {
+      document.getElementById('modalInserir').style.display = 'none';
+    }
+
+    function salvarInserir() {
+      var data = document.getElementById('insData').value;
+      var idx = document.getElementById('insCliente').value;
+      var marca = document.getElementById('insMarca').value;
+      var txt = document.getElementById('insValor').value.trim().replace(/[R$\s]/g, '');
+
+      if (txt.indexOf(',') > -1) {
+        txt = txt.replace(/\./g, '').replace(',', '.');
+      }
+      var valor = parseFloat(txt);
+
+      if (idx === '' || !marca) {
+        alert("⚠️ Selecione o cliente e a marca!");
+        return;
+      }
+      if (isNaN(valor) || valor <= 0) {
+        alert("⚠️ Informe um valor maior que zero!");
+        return;
+      }
+
+      var cliente = clientesMarcasInserir[parseInt(idx, 10)].cliente;
+      var btn = document.getElementById('btnSalvarInserir');
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Inserindo...';
+
+      addDebugLog("➕ Inserindo: " + data + " | " + cliente + " | " + marca + " → R$ " + valor.toFixed(2));
+
+      google.script.run
+        .withSuccessHandler(function(res) {
+          btn.disabled = false;
+          btn.innerHTML = '➕ Inserir Valor';
+          if (res.sucesso) {
+            addDebugLog("✅ " + res.mensagem, "success");
+            alert("✅ " + res.mensagem);
+            fecharModalInserir();
+            carregarHistoricoFaturamento();
+            carregarFaturamentoDia();
+          } else {
+            addDebugLog("❌ " + res.mensagem, "error");
+            alert("❌ " + res.mensagem);
+          }
+        })
+        .withFailureHandler(function(error) {
+          btn.disabled = false;
+          btn.innerHTML = '➕ Inserir Valor';
+          addDebugLog("❌ Erro ao inserir: " + error.message, "error");
+          alert("❌ Erro ao inserir: " + error.message);
+        })
+        .inserirRegistroFaturamento(data, cliente, marca, valor);
     }
 
     // Deleta um registro
