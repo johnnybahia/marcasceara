@@ -1,7 +1,7 @@
 // --- ARQUIVO: Código.gs ---
 
 // Versão do programa (fonte única) — ver CLAUDE.md
-var VERSAO = '1.1.0';
+var VERSAO = '1.2.0';
 var VERSAO_DATA = '16/11/2026';
 
 // ========================================
@@ -2446,8 +2446,12 @@ function verificarTamanhoAbas() {
  * @param {string} observacao - Observação sobre o ajuste
  * @returns {Object} Resultado da operação
  */
-function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) {
+function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao, usuario) {
   try {
+    usuario = (usuario || "").toString().trim();
+    if (!usuario) {
+      return { sucesso: false, mensagem: "Usuário não identificado. Faça login novamente (Ctrl+F5)." };
+    }
     Logger.log("✏️ Editando registro: " + data + " | " + cliente + " | " + marca);
 
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("HistoricoFaturamento");
@@ -2516,9 +2520,12 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
       };
     }
 
-    // Atualiza o valor e observação
+    // Atualiza o valor e observação (com o nome de quem editou)
+    var valorAnteriorEdicao = typeof dados[linhaParaEditar - 2][3] === 'number' ? dados[linhaParaEditar - 2][3] : parseFloat(dados[linhaParaEditar - 2][3]) || 0;
+    var obsEdicao = (observacao ? observacao + " " : "") + "(editado por " + usuario + ")";
     sheet.getRange(linhaParaEditar, 4).setValue(novoValor); // Coluna D: Valor
-    sheet.getRange(linhaParaEditar, 5).setValue(observacao); // Coluna E: Observação
+    sheet.getRange(linhaParaEditar, 5).setValue(obsEdicao); // Coluna E: Observação
+    registrarLogFaturamento(usuario, "EDIÇÃO", dataBusca, cliente.trim(), marca.trim(), valorAnteriorEdicao, novoValor, observacao || "");
 
     // Formata valor como moeda
     sheet.getRange(linhaParaEditar, 4).setNumberFormat("R$ #,##0.00");
@@ -2536,6 +2543,35 @@ function editarRegistroFaturamento(data, cliente, marca, novoValor, observacao) 
       sucesso: false,
       mensagem: "Erro ao editar: " + erro.message
     };
+  }
+}
+
+/**
+ * Registra no log de auditoria (aba LogFaturamento) quem fez o quê.
+ * Nunca interrompe a operação principal: em caso de erro, só grava no Logger.
+ */
+function registrarLogFaturamento(usuario, acao, dataFaturamento, cliente, marca, valorAnterior, valorNovo, obs) {
+  try {
+    var doc = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = doc.getSheetByName("LogFaturamento");
+    if (!sheet) {
+      sheet = doc.insertSheet("LogFaturamento");
+      sheet.appendRow(["Data/Hora", "Usuário", "Ação", "Data do faturamento", "Cliente", "Marca", "Valor anterior", "Valor novo", "Observação"]);
+      var cab = sheet.getRange(1, 1, 1, 9);
+      cab.setBackground("#d32f2f");
+      cab.setFontColor("#FFFFFF");
+      cab.setFontWeight("bold");
+      sheet.setFrozenRows(1);
+    }
+    var linha = sheet.getLastRow() + 1;
+    sheet.getRange(linha, 1, 1, 9).setNumberFormat("@");
+    sheet.getRange(linha, 1, 1, 9).setValues([[
+      obterTimestamp(), usuario, acao, dataFaturamento, cliente, marca,
+      Number(valorAnterior) || 0, Number(valorNovo) || 0, obs || ""
+    ]]);
+    sheet.getRange(linha, 7, 1, 2).setNumberFormat("R$ #,##0.00");
+  } catch (erro) {
+    Logger.log("⚠️ Falha ao gravar log de faturamento: " + erro.toString());
   }
 }
 
@@ -2594,9 +2630,13 @@ function getClientesMarcasFaturamento() {
  * @param {number} valor - Valor positivo a acrescentar
  * @returns {Object} Resultado da operação
  */
-function inserirRegistroFaturamento(data, cliente, marca, valor) {
+function inserirRegistroFaturamento(data, cliente, marca, valor, usuario) {
   var lock = LockService.getScriptLock();
   try {
+    usuario = (usuario || "").toString().trim();
+    if (!usuario) {
+      return { sucesso: false, mensagem: "Usuário não identificado. Faça login novamente (Ctrl+F5)." };
+    }
     data = (data || "").toString().trim();
     cliente = (cliente || "").toString().trim();
     marca = (marca || "").toString().trim();
@@ -2628,7 +2668,7 @@ function inserirRegistroFaturamento(data, cliente, marca, valor) {
 
     var valorTxt = "R$ " + valor.toFixed(2).replace(".", ",");
     var timestamp = obterTimestamp();
-    var obsNova = "Ajuste manual +" + valorTxt;
+    var obsNova = "Ajuste manual +" + valorTxt + " por " + usuario;
     var lastRow = sheet.getLastRow();
     var linha = -1;
     var existente = null;
@@ -2655,7 +2695,9 @@ function inserirRegistroFaturamento(data, cliente, marca, valor) {
     if (linha > 0) {
       var atual = typeof existente[3] === 'number' ? existente[3] : parseFloat(existente[3]) || 0;
       var obsAnterior = existente[4] ? existente[4].toString().trim() : "";
-      sheet.getRange(linha, 4).setValue(Math.round((atual + valor) * 100) / 100).setNumberFormat("R$ #,##0.00");
+      var novoTotal = Math.round((atual + valor) * 100) / 100;
+      sheet.getRange(linha, 4).setValue(novoTotal).setNumberFormat("R$ #,##0.00");
+      registrarLogFaturamento(usuario, "INSERÇÃO", data, cliente, marca, atual, novoTotal, obsNova);
       sheet.getRange(linha, 5).setValue(obsAnterior ? obsAnterior + " | " + obsNova : obsNova);
       sheet.getRange(linha, 6).setValue(timestamp);
       Logger.log("➕ Somado em linha existente " + linha + ": " + valorTxt);
@@ -2663,6 +2705,7 @@ function inserirRegistroFaturamento(data, cliente, marca, valor) {
       var nova = sheet.getLastRow() + 1;
       sheet.getRange(nova, 1, 1, 6).setValues([[data, cliente, marca, valor, obsNova, timestamp]]);
       sheet.getRange(nova, 4).setNumberFormat("R$ #,##0.00");
+      registrarLogFaturamento(usuario, "INSERÇÃO", data, cliente, marca, 0, valor, obsNova);
       Logger.log("➕ Nova linha " + nova + ": " + data + " | " + cliente + " | " + marca + " | " + valorTxt);
     }
 
@@ -2683,8 +2726,12 @@ function inserirRegistroFaturamento(data, cliente, marca, valor) {
  * @param {string} marca - Marca
  * @returns {Object} Resultado da operação
  */
-function deletarRegistroFaturamento(data, cliente, marca) {
+function deletarRegistroFaturamento(data, cliente, marca, usuario) {
   try {
+    usuario = (usuario || "").toString().trim();
+    if (!usuario) {
+      return { sucesso: false, mensagem: "Usuário não identificado. Faça login novamente (Ctrl+F5)." };
+    }
     Logger.log("🗑️ Deletando registro: " + data + " | " + cliente + " | " + marca);
 
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("HistoricoFaturamento");
@@ -2749,8 +2796,14 @@ function deletarRegistroFaturamento(data, cliente, marca) {
       };
     }
 
+    // Guarda o valor antes de apagar (para o log)
+    var linhaDeletada = dados[linhaParaDeletar - 2];
+    var valorDeletado = typeof linhaDeletada[3] === 'number' ? linhaDeletada[3] : parseFloat(linhaDeletada[3]) || 0;
+    var obsDeletada = linhaDeletada[4] ? linhaDeletada[4].toString() : "";
+
     // Deleta a linha
     sheet.deleteRow(linhaParaDeletar);
+    registrarLogFaturamento(usuario, "EXCLUSÃO", dataBusca, cliente.trim(), marca.trim(), valorDeletado, 0, obsDeletada);
 
     Logger.log("✅ Registro deletado com sucesso!");
 

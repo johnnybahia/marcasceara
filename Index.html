@@ -2860,7 +2860,7 @@
           addDebugLog("❌ Erro ao salvar edição: " + error.message, "error");
           alert("❌ Erro ao salvar: " + error.message);
         })
-        .editarRegistroFaturamento(data, cliente, marca, novoValor, observacao);
+        .editarRegistroFaturamento(data, cliente, marca, novoValor, observacao, usuarioLogado.nome);
     }
 
     // ========================================
@@ -2978,7 +2978,7 @@
           addDebugLog("❌ Erro ao inserir: " + error.message, "error");
           alert("❌ Erro ao inserir: " + error.message);
         })
-        .inserirRegistroFaturamento(data, cliente, marca, valor);
+        .inserirRegistroFaturamento(data, cliente, marca, valor, usuarioLogado.nome);
     }
 
     // Deleta um registro
@@ -3013,7 +3013,7 @@
           addDebugLog("❌ Erro ao deletar registro: " + error.message, "error");
           alert("❌ Erro ao deletar: " + error.message);
         })
-        .deletarRegistroFaturamento(data, cliente, marca);
+        .deletarRegistroFaturamento(data, cliente, marca, usuarioLogado.nome);
     }
 
     // ========================================
